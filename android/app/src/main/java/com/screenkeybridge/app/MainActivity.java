@@ -2,16 +2,22 @@ package com.screenkeybridge.app;
 
 import android.app.Activity;
 import android.content.ContentValues;
+import android.content.Intent;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.view.inputmethod.InputMethodManager;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -27,6 +33,9 @@ public final class MainActivity extends Activity {
     private EditText key;
     private TextView status;
     private Button capture;
+    private TextView keyboardStatus;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private boolean visible;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -49,6 +58,19 @@ public final class MainActivity extends Activity {
         capture = new Button(this); capture.setText("Capture PC screen");
         layout.addView(capture);
         status = new TextView(this); status.setText("Ready"); layout.addView(status);
+        Button enable = new Button(this); enable.setText("Enable ScreenKey keyboard");
+        enable.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))); layout.addView(enable);
+        Button choose = new Button(this); choose.setText("Choose ScreenKey keyboard");
+        choose.setOnClickListener(v -> ((InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE)).showInputMethodPicker()); layout.addView(choose);
+        Button toggle = new Button(this); toggle.setText("Toggle PC / phone keyboard");
+        toggle.setOnClickListener(v -> {
+            String secret = key.getText().toString().trim();
+            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the Windows pairing key first."); return; }
+            getPreferences(MODE_PRIVATE).edit().putString("key", secret).apply();
+            worker.execute(() -> { try { String s = BridgeInputMethod.request(this, "toggle").getString("state"); runOnUiThread(() -> keyboardStatus.setText(modeLabel(s))); }
+                catch (Exception e) { runOnUiThread(() -> keyboardStatus.setText("Keyboard: PC unavailable")); } });
+        }); layout.addView(toggle);
+        keyboardStatus = new TextView(this); keyboardStatus.setText("Keyboard: checking"); layout.addView(keyboardStatus);
         capture.setOnClickListener(v -> {
             String secret = key.getText().toString().trim();
             if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the 64-character pairing key from Windows."); return; }
@@ -64,6 +86,24 @@ public final class MainActivity extends Activity {
         });
         setContentView(layout);
     }
+
+    private static String modeLabel(String state) {
+        if ("waiting".equals(state)) return "Keyboard: waiting for a phone text field (30 seconds)";
+        if ("phone".equals(state)) return "Keyboard: phone";
+        return "Keyboard: PC";
+    }
+    private final Runnable refresh = new Runnable() {
+        @Override public void run() {
+            if (!visible) return;
+            worker.execute(() -> {
+                try { String s = BridgeInputMethod.request(MainActivity.this, "state").getString("state"); runOnUiThread(() -> { if (visible) keyboardStatus.setText(modeLabel(s)); }); }
+                catch (Exception e) { runOnUiThread(() -> { if (visible) keyboardStatus.setText("Keyboard: PC unavailable"); }); }
+                main.postDelayed(this, 1500);
+            });
+        }
+    };
+    @Override protected void onResume() { super.onResume(); visible = true; main.post(refresh); }
+    @Override protected void onPause() { visible = false; main.removeCallbacks(refresh); super.onPause(); }
 
     private void saveCapture(String secret) throws Exception {
         HttpURLConnection connection = (HttpURLConnection)new URL("http://127.0.0.1:38473/capture").openConnection();
@@ -95,5 +135,5 @@ public final class MainActivity extends Activity {
             connection.disconnect();
         }
     }
-    @Override protected void onDestroy() { worker.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() { visible = false; main.removeCallbacks(refresh); worker.shutdown(); super.onDestroy(); }
 }

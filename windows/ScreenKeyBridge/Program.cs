@@ -3,7 +3,9 @@ using System.Drawing.Imaging;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace ScreenKeyBridge;
 
@@ -29,17 +31,40 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
     private bool checking;
     private string status = "Starting";
+    private readonly KeyboardRouter keyboard = new();
+    private readonly string shortcutPath;
+    private int shortcut = 11;
 
     public BridgeContext()
     {
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
         Directory.CreateDirectory(dir);
+        shortcutPath = Path.Combine(dir, "keyboard-shortcut.txt");
+        if (File.Exists(shortcutPath) && int.TryParse(File.ReadAllText(shortcutPath), out int saved) && saved is >= 1 and <= 11) shortcut = saved;
+        keyboard.SetToggleFunctionKey(shortcut);
         string path = Path.Combine(dir, "pairing-key.txt");
         if (!File.Exists(path)) File.WriteAllText(path, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         token = File.ReadAllText(path).Trim();
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
         menu.Items.Add("Reconnect ADB", null, async (_, _) => await ConnectAdb());
+        menu.Items.Add("Toggle keyboard routing", null, (_, _) => keyboard.Toggle());
+        var shortcutMenu = new ToolStripMenuItem("Keyboard shortcut (Ctrl+Alt)");
+        for (int i = 1; i <= 11; i++)
+        {
+            int choice = i;
+            var item = new ToolStripMenuItem($"F{i}") { Checked = i == shortcut };
+            item.Click += (_, _) => {
+                try {
+                    File.WriteAllText(shortcutPath, choice.ToString());
+                    shortcut = choice; keyboard.SetToggleFunctionKey(choice);
+                    foreach (ToolStripMenuItem entry in shortcutMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
+                } catch (IOException ex) { MessageBox.Show($"Could not save shortcut: {ex.Message}", "ScreenKey Bridge"); }
+            };
+            shortcutMenu.DropDownItems.Add(item);
+        }
+        menu.Items.Add(shortcutMenu);
+        menu.Items.Add("Return keyboard to PC (Ctrl+Alt+F12)", null, (_, _) => keyboard.Disconnect());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray = new NotifyIcon { Text = "ScreenKey Bridge", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => ShowStatus();
@@ -48,10 +73,12 @@ internal sealed class BridgeContext : ApplicationContext
         catch (HttpListenerException ex) { MessageBox.Show($"Could not start local server: {ex.Message}", "ScreenKey Bridge"); ExitThread(); return; }
         timer.Tick += async (_, _) => await ConnectAdb();
         timer.Start();
+        SystemEvents.SessionSwitch += OnSessionSwitch;
         _ = ConnectAdb();
     }
 
-    private void ShowStatus() => MessageBox.Show($"{status}\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void ShowStatus() => MessageBox.Show($"{status}\nKeyboard: {keyboard.State()}\n\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) keyboard.Disconnect(); }
 
     private async Task ConnectAdb()
     {
@@ -100,7 +127,22 @@ internal sealed class BridgeContext : ApplicationContext
             string given = context.Request.Headers["X-ScreenKey-Token"] ?? "";
             byte[] actual = Encoding.UTF8.GetBytes(given), expected = Encoding.UTF8.GetBytes(token);
             if (actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
-            if (context.Request.HttpMethod != "POST" || context.Request.Url?.AbsolutePath != "/capture") { context.Response.StatusCode = 404; return; }
+            if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
+            string? route = context.Request.Url?.AbsolutePath;
+            if (route is "/keyboard/state" or "/keyboard/toggle" or "/keyboard/poll" or "/keyboard/disconnect" or "/keyboard/unready")
+            {
+                string[] events = Array.Empty<string>();
+                if (route == "/keyboard/toggle") keyboard.Toggle();
+                if (route == "/keyboard/poll") events = keyboard.Heartbeat();
+                if (route == "/keyboard/disconnect") keyboard.Disconnect();
+                if (route == "/keyboard/unready") keyboard.InputUnavailable();
+                byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { state = keyboard.State(), events });
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = json.Length;
+                await context.Response.OutputStream.WriteAsync(json);
+                return;
+            }
+            if (route != "/capture") { context.Response.StatusCode = 404; return; }
             Rectangle bounds = SystemInformation.VirtualScreen;
             using var image = new Bitmap(bounds.Width, bounds.Height);
             using (var graphics = Graphics.FromImage(image)) graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
@@ -117,7 +159,7 @@ internal sealed class BridgeContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); stop.Dispose();
+        SystemEvents.SessionSwitch -= OnSessionSwitch; keyboard.Dispose(); timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); stop.Dispose();
         base.ExitThreadCore();
     }
 }

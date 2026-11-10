@@ -1,6 +1,6 @@
 # ScreenKey Bridge
 
-ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB connection. The first milestone captures the Windows virtual desktop on request and saves the PNG to the phone's gallery. Keyboard routing is **not implemented yet**.
+ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB connection. Capture the Windows virtual desktop to the phone's gallery and try the experimental PC-to-phone keyboard routing.
 
 ## Requirements
 
@@ -22,9 +22,20 @@ The companion periodically checks ADB and sets up `adb reverse tcp:38473 tcp:384
 
 The server binds only to Windows loopback and requires a random pairing key. The key is saved under your Windows user profile and in the Android app's private preferences; keep both devices and the key private. The tunnel is intended for a trusted ADB-connected device, not for exposing directly to a network. The Android app does not need broad storage access. Neither component sends screenshots to a cloud service.
 
+## Experimental keyboard routing
+
+1. In the Android app, save your pairing key by capturing a screen or pressing the keyboard toggle. Tap **Enable ScreenKey keyboard**, enable it in Android settings, and then use **Choose ScreenKey keyboard** to select it. Android displays a standard warning when enabling a keyboard; input methods can receive text you type through them.
+2. Open a text field in the target phone app. Press **Ctrl+Alt+F11** on Windows or use the toggle shown on the ScreenKey keyboard. Alternatively, use the Android app's toggle and open a text field within 30 seconds.
+3. Press **Ctrl+Alt+F12** to return to PC typing. Ctrl+Alt+F11 also toggles the mode. The function key used with Ctrl+Alt can be changed from the Windows tray menu; F12 is reserved for emergency return.
+4. Use **Choose another keyboard** on the ScreenKey keyboard to return to your normal Android keyboard.
+
+The phone app reports PC, waiting, or phone state. Redirected events are held briefly in memory and never written to a log. Routing returns to the PC if the input method loses its field, the Windows session locks, the connection lease expires, or an unsupported key is pressed. Waiting requests expire after 30 seconds. On a dropped connection, keystrokes already in transit can be lost; they are not replayed. Windows can silently remove a stalled low-level keyboard hook, so this prototype cannot guarantee detection of every hook failure. Check the destination before typing sensitive text.
+
+The first version supports the US keyboard layout, basic letters, digits, punctuation, space, backspace, enter, and arrows. Other layouts, composed characters, shortcuts, and non-text fields are not supported reliably. Unsupported keys end routing and pass through to Windows. The ScreenKey input method is a bridge, not a full touch keyboard; use the keyboard picker to return to your usual one. Actual physical-keyboard handoff still needs broader testing on real devices.
+
 ## Current limitations
 
-- No keyboard routing, PC shortcut, Android input method, startup-at-login option, or monitor selection yet.
+- Keyboard routing is experimental; startup-at-login and monitor selection are not available yet.
 - Pairing key rotation and selecting among multiple ADB devices are not yet exposed in the UI. To reset pairing, exit the companion, delete `%LOCALAPPDATA%\ScreenKeyBridge\pairing-key.txt`, and restart it; enter the new key on the phone.
 - Wireless ADB connections depend on the device and network remaining connected. Reconnect ADB if necessary; the companion retries the reverse mapping.
 - This is an early development build, not a security boundary against malicious software running as the same Windows or Android user.
