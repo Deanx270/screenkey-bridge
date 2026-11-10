@@ -47,15 +47,16 @@ public final class CaptureService extends Service {
             String secret = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("key", "");
             String display = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("display", "");
             boolean success = false;
+            CaptureStorage.ClipboardResult clipboard = CaptureStorage.ClipboardResult.FAILED;
             String result;
             try {
                 if (secret == null || !secret.matches("[0-9A-F]{64}")) throw new Exception("Set the pairing key in the app first");
-                CaptureStorage.capture(this, secret, display == null ? "" : display, requestId);
-                success = true; result = "Screenshot saved to your gallery.";
+                clipboard = CaptureStorage.capture(this, secret, display == null ? "" : display, requestId);
+                success = true; result = CaptureStorage.message(clipboard);
             } catch (Exception e) { result = "Capture failed: " + (e.getMessage() == null ? "check your connection" : e.getMessage()); }
-            if (requestId != null && secret != null && secret.matches("[0-9A-F]{64}")) acknowledge(secret, requestId, success);
+            if (requestId != null && secret != null && secret.matches("[0-9A-F]{64}")) acknowledge(secret, requestId, success, clipboard);
             final String message = result;
-            getSharedPreferences("capture_status", MODE_PRIVATE).edit().putString("tile", success ? "Saved to gallery" : "Capture failed")
+            getSharedPreferences("capture_status", MODE_PRIVATE).edit().putString("tile", success ? (clipboard == CaptureStorage.ClipboardResult.COPIED ? "Saved and copied" : "Saved; check clipboard") : "Capture failed")
                 .putString("message", result).putLong("time", System.currentTimeMillis()).apply();
             try { TileService.requestListeningState(this, new ComponentName(this, CaptureTile.class)); } catch (RuntimeException ignored) { }
             main.post(() -> {
@@ -69,9 +70,9 @@ public final class CaptureService extends Service {
         });
         return START_NOT_STICKY;
     }
-    private void acknowledge(String secret, String id, boolean success) {
+    private void acknowledge(String secret, String id, boolean success, CaptureStorage.ClipboardResult clipboard) {
         try {
-            String url = "http://127.0.0.1:38473/capture/ack?id=" + URLEncoder.encode(id, "UTF-8") + "&ok=" + (success ? "1" : "0");
+            String url = "http://127.0.0.1:38473/capture/ack?id=" + URLEncoder.encode(id, "UTF-8") + "&ok=" + (success ? "1" : "0") + "&clipboard=" + clipboard.name().toLowerCase(java.util.Locale.ROOT);
             HttpURLConnection c = (HttpURLConnection)new URL(url).openConnection();
             try { c.setRequestMethod("POST"); c.setConnectTimeout(1000); c.setReadTimeout(1000); c.setRequestProperty("X-ScreenKey-Token", secret); c.getResponseCode(); }
             finally { c.disconnect(); }

@@ -1,6 +1,8 @@
 package com.screenkeybridge.app;
 
 import android.content.ContentValues;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Environment;
@@ -16,8 +18,10 @@ import java.util.Locale;
 
 final class CaptureStorage {
     private CaptureStorage() {}
+    enum ClipboardResult { COPIED, UNVERIFIED, FAILED }
+    private static final Object clipboardLock = new Object();
 
-    static void capture(Context context, String secret, String display, String requestId) throws Exception {
+    static ClipboardResult capture(Context context, String secret, String display, String requestId) throws Exception {
         String url = requestId == null
             ? "http://127.0.0.1:38473/capture" + (display.isEmpty() ? "" : "?display=" + URLEncoder.encode(display, "UTF-8"))
             : "http://127.0.0.1:38473/capture/pending?id=" + URLEncoder.encode(requestId, "UTF-8");
@@ -44,10 +48,35 @@ final class CaptureStorage {
             }
             ContentValues publish = new ContentValues(); publish.put(MediaStore.Images.Media.IS_PENDING, 0);
             if (context.getContentResolver().update(item, publish, null, null) != 1) throw new Exception("could not publish gallery image");
+            Uri published = item;
             item = null;
+            return copyToClipboard(context, published);
         } finally {
             if (item != null) context.getContentResolver().delete(item, null, null);
             connection.disconnect();
         }
+    }
+
+    private static ClipboardResult copyToClipboard(Context context, Uri uri) {
+        synchronized (clipboardLock) {
+            ClipboardManager clipboard = (ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) return ClipboardResult.FAILED;
+            try {
+                ClipData data = ClipData.newUri(context.getContentResolver(), "PC screenshot", uri);
+                clipboard.setPrimaryClip(data);
+                context.getSharedPreferences("capture_status", Context.MODE_PRIVATE).edit().putString("last_image_uri", uri.toString()).apply();
+            } catch (RuntimeException e) { return ClipboardResult.FAILED; }
+            try {
+                ClipData current = clipboard.getPrimaryClip();
+                if (current == null) return ClipboardResult.UNVERIFIED;
+                return current.getItemCount() > 0 && uri.equals(current.getItemAt(0).getUri()) ? ClipboardResult.COPIED : ClipboardResult.FAILED;
+            } catch (RuntimeException e) { return ClipboardResult.UNVERIFIED; }
+        }
+    }
+
+    static String message(ClipboardResult result) {
+        if (result == ClipboardResult.COPIED) return "Screenshot saved and copied to phone clipboard.";
+        if (result == ClipboardResult.FAILED) return "Screenshot saved, but could not copy to clipboard.";
+        return "Screenshot saved; clipboard copy could not be verified.";
     }
 }

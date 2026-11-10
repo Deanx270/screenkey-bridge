@@ -49,7 +49,7 @@ internal sealed class BridgeContext : ApplicationContext
     private string selectedDisplay = "";
     private PendingCapture? pendingCapture;
     private int captureBusy;
-    private sealed record PendingCapture(string Id, byte[] Image, TaskCompletionSource<bool> Completion);
+    private sealed record PendingCapture(string Id, byte[] Image, TaskCompletionSource<string> Completion);
 
     public BridgeContext()
     {
@@ -284,14 +284,14 @@ internal sealed class BridgeContext : ApplicationContext
             lock (captureGate) display = selectedDisplay;
             // This method runs on a worker queued directly by the keyboard hook. Capture before starting ADB.
             byte[] image = CaptureBytes(display);
-            request = new PendingCapture(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), image, new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+            request = new PendingCapture(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), image, new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
             lock (captureGate) pendingCapture = request;
             SetCaptureStatus("sending to phone…");
             string output = await RunAdb($"-s {serial} shell am start-foreground-service -n com.screenkeybridge.app/.CaptureService --es request_id {request.Id}");
             if (output.Contains("Error:", StringComparison.OrdinalIgnoreCase) || output.Contains("Exception", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("phone could not start capture service");
             if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(30))) != request.Completion.Task)
                 throw new TimeoutException("phone did not confirm the save");
-            SetCaptureStatus(await request.Completion.Task ? "saved to phone" : "phone could not save; check phone notification");
+            SetCaptureStatus(await request.Completion.Task);
         }
         catch (Exception ex) { SetCaptureStatus("failed: " + ex.Message); }
         finally
@@ -348,7 +348,15 @@ internal sealed class BridgeContext : ApplicationContext
                 PendingCapture? pending;
                 lock (captureGate) pending = pendingCapture;
                 if (pending == null || !string.Equals(pending.Id, id, StringComparison.Ordinal)) { context.Response.StatusCode = 404; return; }
-                if (route == "/capture/ack") { pending.Completion.TrySetResult(context.Request.QueryString["ok"] == "1"); return; }
+                if (route == "/capture/ack")
+                {
+                    string result = context.Request.QueryString["ok"] != "1" ? "phone could not save; check phone notification" : context.Request.QueryString["clipboard"] switch {
+                        "copied" => "saved to phone and copied to clipboard",
+                        "failed" => "saved to phone; clipboard copy failed",
+                        _ => "saved to phone; clipboard copy unverified"
+                    };
+                    pending.Completion.TrySetResult(result); return;
+                }
                 context.Response.ContentType = "image/png";
                 context.Response.ContentLength64 = pending.Image.Length;
                 await context.Response.OutputStream.WriteAsync(pending.Image);

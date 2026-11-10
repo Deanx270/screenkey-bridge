@@ -10,6 +10,11 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
+import android.net.Uri;
+import android.view.inputmethod.InputContentInfo;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -47,7 +52,8 @@ public final class BridgeInputMethod extends InputMethodService {
                         for (int i = 0; i < events.length(); i++) {
                             String event = events.optString(i);
                             if ("<unsupported>".equals(event)) { showNotice("That key or shortcut is not supported yet."); continue; }
-                            if (!deliver(connection, event)) {
+                            boolean delivered = "<ctrl:v>".equals(event) ? paste(BridgeInputMethod.this, connection, getCurrentInputEditorInfo()) : deliver(connection, event);
+                            if (!delivered) {
                                 if (event.startsWith("<ctrl:") || event.startsWith("<shift:")) {
                                     showNotice("This phone app did not accept that shortcut.");
                                     continue;
@@ -133,6 +139,24 @@ public final class BridgeInputMethod extends InputMethodService {
                 if (text.startsWith("<shift:") || text.startsWith("<ctrl:")) return deliverModifiedNavigation(c, text);
                 return text.length() == 1 && c.commitText(text, 1);
         }
+    }
+    static boolean paste(Context context, InputConnection connection, EditorInfo editor) {
+        try {
+            ClipboardManager clipboard = (ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
+            if (clip != null && clip.getItemCount() > 0 && clip.getDescription().hasMimeType("image/png") && editor != null && editor.contentMimeTypes != null) {
+                Uri uri = clip.getItemAt(0).getUri();
+                String last = context.getSharedPreferences("capture_status", MODE_PRIVATE).getString("last_image_uri", "");
+                boolean supportsImage = false;
+                for (String mime : editor.contentMimeTypes) if (mime != null && ClipDescription.compareMimeTypes("image/png", mime)) supportsImage = true;
+                if (uri != null && uri.toString().equals(last) && supportsImage) {
+                    InputContentInfo content = new InputContentInfo(uri, new ClipDescription("PC screenshot", new String[]{"image/png"}), null);
+                    connection.finishComposingText();
+                    if (connection.commitContent(content, InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION, null)) return true;
+                }
+            }
+        } catch (RuntimeException ignored) { }
+        return connection.performContextMenuAction(android.R.id.paste);
     }
     private static boolean deletePreviousWord(InputConnection c) {
         CharSequence selection = c.getSelectedText(0);

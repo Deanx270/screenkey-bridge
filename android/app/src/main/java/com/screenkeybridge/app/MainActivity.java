@@ -126,7 +126,7 @@ public final class MainActivity extends Activity {
             capture.setEnabled(false); status.setText("Capturing…");
             worker.execute(() -> {
                 String result;
-                try { CaptureStorage.capture(this, secret, display, null); result = "Saved to Pictures/ScreenKey Bridge."; }
+                try { result = CaptureStorage.message(CaptureStorage.capture(this, secret, display, null)); }
                 catch (Exception e) { result = "Capture failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }
                 String message = result;
                 runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { status.setText(message); capture.setEnabled(true); } });
