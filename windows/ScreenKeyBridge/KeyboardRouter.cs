@@ -92,20 +92,31 @@ internal sealed class KeyboardRouter : IDisposable
             if (IsModifier(key)) { swallowed.Add(key); return (IntPtr)1; }
             bool shift = held.Contains(0x10) || held.Contains(0xA0) || held.Contains(0xA1);
             bool caps = (GetKeyState(0x14) & 1) != 0;
-            string? value = ctrl || alt ? null : Translate(key, shift, caps);
-            // Unsupported keys fail open and end routing instead of silently dropping input.
-            if (value == null || queue.Count >= 128) { Reset(); return CallNextHookEx(hook, code, message, data); }
+            string value = (ctrl || alt ? TranslateShortcut(key, ctrl, alt, shift) : Translate(key, shift, caps)) ?? "<unsupported>";
+            // If delivery cannot keep up, fail open instead of buffering without bound.
+            if (queue.Count >= 128) { Reset(); return CallNextHookEx(hook, code, message, data); }
             queue.Enqueue(value); swallowed.Add(key); return (IntPtr)1;
         }
     }
 
     private static bool IsModifier(int k) => k is 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5;
+    private static string? TranslateShortcut(int key, bool ctrl, bool alt, bool shift)
+    {
+        if (!ctrl || alt) return null;
+        string? name = key switch {
+            0x41 => "a", 0x43 => "c", 0x56 => "v", 0x58 => "x", 0x59 => "y", 0x5A => "z",
+            0x08 => "backspace", 0x2E => "delete", 0x25 => "left", 0x26 => "up", 0x27 => "right", 0x28 => "down", 0x24 => "home", 0x23 => "end", _ => null };
+        if (shift && key is not (0x5A or 0x25 or 0x26 or 0x27 or 0x28 or 0x24 or 0x23)) return null;
+        return name == null ? null : $"<ctrl:{(shift ? "shift:" : "")}{name}>";
+    }
     private static string? Translate(int k, bool shift, bool caps)
     {
         if (k >= 0x41 && k <= 0x5A) return ((char)((shift ^ caps) ? k : k + 32)).ToString();
         if (k >= 0x30 && k <= 0x39) return (shift ? ")!@#$%^&*("[k - 0x30] : (char)k).ToString();
         return k switch {
-            0x20 => " ", 0x08 => "<backspace>", 0x0D => "<enter>", 0x25 => "<left>", 0x26 => "<up>", 0x27 => "<right>", 0x28 => "<down>",
+            0x20 => " ", 0x08 => "<backspace>", 0x0D => "<enter>",
+            0x25 => shift ? "<shift:left>" : "<left>", 0x26 => shift ? "<shift:up>" : "<up>", 0x27 => shift ? "<shift:right>" : "<right>", 0x28 => shift ? "<shift:down>" : "<down>",
+            0x24 => shift ? "<shift:home>" : "<home>", 0x23 => shift ? "<shift:end>" : "<end>", 0x2E => "<delete>", 0x09 => shift ? "<shift:tab>" : "<tab>",
             0xBA => shift ? ":" : ";", 0xBB => shift ? "+" : "=", 0xBC => shift ? "<" : ",", 0xBD => shift ? "_" : "-", 0xBE => shift ? ">" : ".", 0xBF => shift ? "?" : "/", 0xC0 => shift ? "~" : "`", 0xDB => shift ? "{" : "[", 0xDC => shift ? "|" : "\\", 0xDD => shift ? "}" : "]", 0xDE => shift ? "\"" : "'", _ => null };
     }
     public void Dispose() { lock (gate) { Reset(); if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } } }

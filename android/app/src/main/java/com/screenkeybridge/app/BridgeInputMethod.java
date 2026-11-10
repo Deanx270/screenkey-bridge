@@ -4,6 +4,7 @@ import android.inputmethodservice.InputMethodService;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
+import android.view.KeyCharacterMap;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -17,6 +18,8 @@ import org.json.JSONObject;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.BreakIterator;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,6 +29,7 @@ public final class BridgeInputMethod extends InputMethodService {
     private volatile int generation;
     private volatile boolean ready;
     private TextView status;
+    private long noticeUntil;
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             final int current = generation;
@@ -37,12 +41,19 @@ public final class BridgeInputMethod extends InputMethodService {
                     String state = reply.getString("state");
                     main.post(() -> {
                         if (!ready || current != generation) return;
-                        if (status != null) status.setText("Keyboard: " + state + "  •  Ctrl+Alt+F12 returns to PC");
+                        if (status != null && android.os.SystemClock.uptimeMillis() >= noticeUntil) status.setText("Keyboard: " + state + "  •  Ctrl+Alt+F12 returns to PC");
                         InputConnection connection = getCurrentInputConnection();
                         if (connection == null) { ready = false; generation++; return; }
                         for (int i = 0; i < events.length(); i++) {
                             String event = events.optString(i);
-                            if (!deliver(connection, event)) { ready = false; generation++; break; }
+                            if ("<unsupported>".equals(event)) { showNotice("That key or shortcut is not supported yet."); continue; }
+                            if (!deliver(connection, event)) {
+                                if (event.startsWith("<ctrl:") || event.startsWith("<shift:")) {
+                                    showNotice("This phone app did not accept that shortcut.");
+                                    continue;
+                                }
+                                ready = false; generation++; break;
+                            }
                         }
                     });
                 } catch (Exception e) {
@@ -52,6 +63,8 @@ public final class BridgeInputMethod extends InputMethodService {
             });
         }
     };
+
+    private void showNotice(String text) { noticeUntil = android.os.SystemClock.uptimeMillis() + 2500; if (status != null) status.setText(text); }
 
     @Override public View onCreateInputView() {
         LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
@@ -97,14 +110,73 @@ public final class BridgeInputMethod extends InputMethodService {
 
     private static boolean deliver(InputConnection c, String text) {
         switch (text) {
+            case "<ctrl:a>": return c.performContextMenuAction(android.R.id.selectAll);
+            case "<ctrl:c>": return c.performContextMenuAction(android.R.id.copy);
+            case "<ctrl:x>": return c.performContextMenuAction(android.R.id.cut);
+            case "<ctrl:v>": return c.performContextMenuAction(android.R.id.paste);
+            case "<ctrl:backspace>": return deletePreviousWord(c);
+            case "<ctrl:z>": return modified(c, KeyEvent.KEYCODE_Z, KeyEvent.META_CTRL_ON);
+            case "<ctrl:shift:z>": return modified(c, KeyEvent.KEYCODE_Z, KeyEvent.META_CTRL_ON | KeyEvent.META_SHIFT_ON);
+            case "<ctrl:y>": return modified(c, KeyEvent.KEYCODE_Y, KeyEvent.META_CTRL_ON);
+            case "<ctrl:delete>": return modified(c, KeyEvent.KEYCODE_FORWARD_DEL, KeyEvent.META_CTRL_ON);
             case "<backspace>": return c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)) && c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL));
             case "<enter>": return c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER)) && c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER));
+            case "<delete>": return arrow(c, KeyEvent.KEYCODE_FORWARD_DEL);
+            case "<tab>": return arrow(c, KeyEvent.KEYCODE_TAB);
+            case "<home>": return arrow(c, KeyEvent.KEYCODE_MOVE_HOME);
+            case "<end>": return arrow(c, KeyEvent.KEYCODE_MOVE_END);
             case "<left>": return arrow(c, KeyEvent.KEYCODE_DPAD_LEFT);
             case "<right>": return arrow(c, KeyEvent.KEYCODE_DPAD_RIGHT);
             case "<up>": return arrow(c, KeyEvent.KEYCODE_DPAD_UP);
             case "<down>": return arrow(c, KeyEvent.KEYCODE_DPAD_DOWN);
-            default: return text.length() == 1 && c.commitText(text, 1);
+            default:
+                if (text.startsWith("<shift:") || text.startsWith("<ctrl:")) return deliverModifiedNavigation(c, text);
+                return text.length() == 1 && c.commitText(text, 1);
         }
+    }
+    private static boolean deletePreviousWord(InputConnection c) {
+        CharSequence selection = c.getSelectedText(0);
+        if (selection != null && selection.length() > 0) return c.commitText("", 1);
+        CharSequence before = c.getTextBeforeCursor(4096, 0);
+        if (before == null) return modified(c, KeyEvent.KEYCODE_DEL, KeyEvent.META_CTRL_ON);
+        String text = before.toString();
+        int end = text.length();
+        while (end > 0) {
+            int cp = text.codePointBefore(end);
+            if (!Character.isWhitespace(cp)) break;
+            end -= Character.charCount(cp);
+        }
+        if (end == 0) return text.isEmpty() || c.deleteSurroundingText(text.length(), 0);
+        BreakIterator words = BreakIterator.getWordInstance(Locale.getDefault());
+        words.setText(text);
+        int start = words.preceding(end);
+        if (start == BreakIterator.DONE) start = 0;
+        return c.deleteSurroundingText(text.length() - start, 0);
+    }
+    private static boolean deliverModifiedNavigation(InputConnection c, String event) {
+        boolean ctrl = event.startsWith("<ctrl:");
+        boolean shift = event.startsWith("<shift:") || event.startsWith("<ctrl:shift:");
+        int start = event.lastIndexOf(':') + 1;
+        if (!event.endsWith(">") || start < 1) return true;
+        String name = event.substring(start, event.length() - 1);
+        int key;
+        switch (name) {
+            case "left": key = KeyEvent.KEYCODE_DPAD_LEFT; break;
+            case "right": key = KeyEvent.KEYCODE_DPAD_RIGHT; break;
+            case "up": key = KeyEvent.KEYCODE_DPAD_UP; break;
+            case "down": key = KeyEvent.KEYCODE_DPAD_DOWN; break;
+            case "home": key = KeyEvent.KEYCODE_MOVE_HOME; break;
+            case "end": key = KeyEvent.KEYCODE_MOVE_END; break;
+            case "tab": key = KeyEvent.KEYCODE_TAB; break;
+            default: return true;
+        }
+        return modified(c, key, (ctrl ? KeyEvent.META_CTRL_ON : 0) | (shift ? KeyEvent.META_SHIFT_ON : 0));
+    }
+    private static boolean modified(InputConnection c, int key, int meta) {
+        long now = android.os.SystemClock.uptimeMillis();
+        KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, key, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_SOFT_KEYBOARD);
+        KeyEvent up = new KeyEvent(now, now, KeyEvent.ACTION_UP, key, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_SOFT_KEYBOARD);
+        return c.sendKeyEvent(down) && c.sendKeyEvent(up);
     }
     private static boolean arrow(InputConnection c, int key) { return c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key)) && c.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, key)); }
 }

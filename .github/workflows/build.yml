@@ -9,6 +9,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - run: dotnet build windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release
+      - run: dotnet run --project windows/ScreenKeyBridge.Tests/ScreenKeyBridge.Tests.csproj -c Release -- windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.dll
   android:
     runs-on: ubuntu-latest
     steps:
@@ -24,4 +25,4 @@ jobs:
         with:
           gradle-version: '8.9'
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - run: gradle -p android assembleDebug
+      - run: gradle -p android assembleDebug assembleDebugAndroidTest

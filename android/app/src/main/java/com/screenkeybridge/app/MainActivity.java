@@ -13,17 +13,28 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.view.inputmethod.InputMethodManager;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,6 +45,8 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button capture;
     private TextView keyboardStatus;
+    private Spinner displayPicker;
+    private boolean updatingDisplays;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean visible;
 
@@ -55,6 +68,20 @@ public final class MainActivity extends Activity {
         key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setText(getPreferences(MODE_PRIVATE).getString("key", ""));
         layout.addView(key);
+        TextView displayLabel = new TextView(this); displayLabel.setText("Screenshot display"); layout.addView(displayLabel);
+        displayPicker = new Spinner(this); layout.addView(displayPicker);
+        List<DisplayChoice> initial = new ArrayList<>();
+        initial.add(new DisplayChoice("", "All displays"));
+        String savedDisplay = getPreferences(MODE_PRIVATE).getString("display", "");
+        if (savedDisplay != null && !savedDisplay.isEmpty()) initial.add(new DisplayChoice(savedDisplay, "Saved display (checking availability)"));
+        setDisplays(initial);
+        displayPicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!updatingDisplays) getPreferences(MODE_PRIVATE).edit().putString("display", ((DisplayChoice)parent.getItemAtPosition(position)).id).apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        Button refreshDisplays = new Button(this); refreshDisplays.setText("Refresh displays"); refreshDisplays.setOnClickListener(v -> loadDisplays()); layout.addView(refreshDisplays);
         capture = new Button(this); capture.setText("Capture PC screen");
         layout.addView(capture);
         status = new TextView(this); status.setText("Ready"); layout.addView(status);
@@ -75,16 +102,67 @@ public final class MainActivity extends Activity {
             String secret = key.getText().toString().trim();
             if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the 64-character pairing key from Windows."); return; }
             getPreferences(MODE_PRIVATE).edit().putString("key", secret).apply();
+            DisplayChoice selected = (DisplayChoice)displayPicker.getSelectedItem();
+            String display = selected == null ? "" : selected.id;
             capture.setEnabled(false); status.setText("Capturing…");
             worker.execute(() -> {
                 String result;
-                try { saveCapture(secret); result = "Saved to Pictures/ScreenKey Bridge."; }
+                try { saveCapture(secret, display); result = "Saved to Pictures/ScreenKey Bridge."; }
                 catch (Exception e) { result = "Capture failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }
                 String message = result;
                 runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { status.setText(message); capture.setEnabled(true); } });
             });
         });
-        setContentView(layout);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout); setContentView(scroll);
+    }
+
+    private static final class DisplayChoice {
+        final String id, label;
+        DisplayChoice(String id, String label) { this.id = id; this.label = label; }
+        @Override public String toString() { return label; }
+    }
+    private void setDisplays(List<DisplayChoice> choices) {
+        String saved = getPreferences(MODE_PRIVATE).getString("display", "");
+        int selected = 0;
+        for (int i = 0; i < choices.size(); i++) if (choices.get(i).id.equals(saved)) selected = i;
+        updatingDisplays = true;
+        ArrayAdapter<DisplayChoice> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, choices);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        displayPicker.setAdapter(adapter); displayPicker.setSelection(selected);
+        updatingDisplays = false;
+    }
+    private void loadDisplays() {
+        String secret = key.getText().toString().trim();
+        if (!secret.matches("[0-9A-F]{64}")) return;
+        worker.execute(() -> {
+            try {
+                JSONObject response = requestDisplays(secret);
+                JSONArray entries = response.getJSONArray("displays");
+                List<DisplayChoice> choices = new ArrayList<>(); choices.add(new DisplayChoice("", "All displays"));
+                for (int i = 0; i < entries.length(); i++) {
+                    JSONObject entry = entries.getJSONObject(i);
+                    choices.add(new DisplayChoice(entry.getString("id"), entry.getString("label")));
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    String saved = getPreferences(MODE_PRIVATE).getString("display", "");
+                    boolean found = false; for (DisplayChoice choice : choices) if (choice.id.equals(saved)) found = true;
+                    if (!found && saved != null && !saved.isEmpty()) choices.add(new DisplayChoice(saved, "Previously selected display (unavailable)"));
+                    setDisplays(choices);
+                });
+            } catch (Exception e) { runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) status.setText("Display list unavailable. Check the PC connection or refresh displays."); }); }
+        });
+    }
+    private JSONObject requestDisplays(String secret) throws Exception {
+        HttpURLConnection c = (HttpURLConnection)new URL("http://127.0.0.1:38473/displays").openConnection();
+        c.setRequestMethod("POST"); c.setConnectTimeout(3000); c.setReadTimeout(3000); c.setRequestProperty("X-ScreenKey-Token", secret);
+        try {
+            if (c.getResponseCode() != 200) throw new Exception("Could not retrieve displays");
+            try (InputStream in = c.getInputStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                byte[] b = new byte[1024]; int n; while ((n = in.read(b)) != -1) { if (out.size() + n > 32768) throw new Exception("Display list too large"); out.write(b, 0, n); }
+                return new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));
+            }
+        } finally { c.disconnect(); }
     }
 
     private static String modeLabel(String state) {
@@ -108,17 +186,18 @@ public final class MainActivity extends Activity {
             });
         }
     };
-    @Override protected void onResume() { super.onResume(); visible = true; main.post(refresh); }
+    @Override protected void onResume() { super.onResume(); visible = true; main.post(refresh); loadDisplays(); }
     @Override protected void onPause() { visible = false; main.removeCallbacks(refresh); super.onPause(); }
 
-    private void saveCapture(String secret) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL("http://127.0.0.1:38473/capture").openConnection();
+    private void saveCapture(String secret, String display) throws Exception {
+        String url = "http://127.0.0.1:38473/capture" + (display.isEmpty() ? "" : "?display=" + URLEncoder.encode(display, "UTF-8"));
+        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
         connection.setRequestMethod("POST"); connection.setConnectTimeout(5000); connection.setReadTimeout(30000);
         connection.setRequestProperty("X-ScreenKey-Token", secret);
         Uri item = null;
         try {
             int code = connection.getResponseCode();
-            if (code != 200) throw new Exception(code == 401 ? "pairing key rejected" : "PC returned HTTP " + code);
+            if (code != 200) throw new Exception(code == 401 ? "pairing key rejected" : code == 400 ? "selected display unavailable; refresh displays" : "PC returned HTTP " + code);
             if (!"image/png".equalsIgnoreCase(connection.getContentType())) throw new Exception("unexpected response from PC");
             ContentValues values = new ContentValues();
             values.put(MediaStore.Images.Media.DISPLAY_NAME, "ScreenKey_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date()) + ".png");

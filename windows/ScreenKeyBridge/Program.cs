@@ -229,6 +229,18 @@ internal sealed class BridgeContext : ApplicationContext
             if (actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
             if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
             string? route = context.Request.Url?.AbsolutePath;
+            if (route == "/displays")
+            {
+                var displays = Screen.AllScreens.Select((screen, index) => new {
+                    id = screen.DeviceName,
+                    label = $"Display {index + 1}{(screen.Primary ? " (primary)" : "")} — {screen.Bounds.Width} × {screen.Bounds.Height}"
+                }).ToArray();
+                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new { displays });
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = payload.Length;
+                await context.Response.OutputStream.WriteAsync(payload);
+                return;
+            }
             if (route is "/keyboard/state" or "/keyboard/toggle" or "/keyboard/poll" or "/keyboard/disconnect" or "/keyboard/unready")
             {
                 string[] events = Array.Empty<string>();
@@ -243,7 +255,15 @@ internal sealed class BridgeContext : ApplicationContext
                 return;
             }
             if (route != "/capture") { context.Response.StatusCode = 404; return; }
-            Rectangle bounds = SystemInformation.VirtualScreen;
+            string? selectedDisplay = context.Request.QueryString["display"];
+            Rectangle bounds;
+            if (string.IsNullOrEmpty(selectedDisplay)) bounds = SystemInformation.VirtualScreen;
+            else
+            {
+                var display = Screen.AllScreens.FirstOrDefault(screen => string.Equals(screen.DeviceName, selectedDisplay, StringComparison.Ordinal));
+                if (display == null) { context.Response.StatusCode = 400; return; }
+                bounds = display.Bounds;
+            }
             using var image = new Bitmap(bounds.Width, bounds.Height);
             using (var graphics = Graphics.FromImage(image)) graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
             using var stream = new MemoryStream();

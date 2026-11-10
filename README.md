@@ -14,7 +14,7 @@ ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB 
 1. Build the companion: `dotnet build windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release`.
 2. Build the Android debug app: from `android`, run `gradle assembleDebug`, then install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
 3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Right-click its icon and select **Show pairing key and status**.
-4. Enter that key in the phone app and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery.
+4. Enter that key in the phone app, choose **All displays** or a specific monitor, and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery. Use **Refresh displays** after connecting or disconnecting monitors. If a selected monitor is unavailable, capture reports an error rather than silently switching to another monitor.
 
 To produce a standalone Windows executable that does not require an installed .NET runtime, run `dotnet publish windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish` and start `publish/ScreenKeyBridge.exe`.
 
@@ -22,7 +22,7 @@ The companion periodically checks ADB and sets up `adb reverse tcp:38473 tcp:384
 
 To start the companion when you sign in, right-click its tray icon and check **Start at Windows sign-in**. This is off by default and can be unchecked in the same menu. The per-user startup entry points to the executable's current location; if you move it, remove the old entry in Windows Startup settings and enable the option again from its new location.
 
-The app captures the Windows virtual desktop, including all monitors, as one PNG; gaps between monitors are included. Capture while locked, protected content, and some display-sharing configurations may not work. No guarantee is made about visibility in third-party sharing or security tools.
+When **All displays** is selected, the app captures the Windows virtual desktop as one PNG; gaps between monitors are included. Capture while locked, protected content, and some display-sharing configurations may not work. No guarantee is made about visibility in third-party sharing or security tools.
 
 The server binds only to Windows loopback and requires a random pairing key. The key is saved under your Windows user profile and in the Android app's private preferences; keep both devices and the key private. The tunnel is intended for a trusted ADB-connected device, not for exposing directly to a network. The Android app does not need broad storage access. Neither component sends screenshots to a cloud service.
 
@@ -33,13 +33,13 @@ The server binds only to Windows loopback and requires a random pairing key. The
 3. Press **Ctrl+Alt+F12** to return to PC typing. Ctrl+Alt+F11 also toggles the mode. The function key used with Ctrl+Alt can be changed from the Windows tray menu; F12 is reserved for emergency return.
 4. Use **Choose another keyboard** on the ScreenKey keyboard to return to your normal Android keyboard.
 
-The phone app reports PC, waiting, or phone state. Redirected events are held briefly in memory and never written to a log. Routing returns to the PC if the input method loses its field, the Windows session locks, the connection lease expires, or an unsupported key is pressed. Waiting requests expire after 30 seconds. On a dropped connection, keystrokes already in transit can be lost; they are not replayed. Windows can silently remove a stalled low-level keyboard hook, so this prototype cannot guarantee detection of every hook failure. Check the destination before typing sensitive text.
+The phone app reports PC, waiting, or phone state. Redirected events are held briefly in memory and never written to a log. Routing returns to the PC if the input method loses its field, the Windows session locks, the connection lease expires, the queue fills, or a toggle or emergency shortcut is used. Unsupported keys and shortcuts stay in phone mode and show a notice on the ScreenKey keyboard. Waiting requests expire after 30 seconds. On a dropped connection, keystrokes already in transit can be lost; they are not replayed. Windows can silently remove a stalled low-level keyboard hook, so this prototype cannot guarantee detection of every hook failure. Check the destination before typing sensitive text.
 
-The first version supports the US keyboard layout, basic letters, digits, punctuation, space, backspace, enter, and arrows. Other layouts, composed characters, shortcuts, and non-text fields are not supported reliably. Unsupported keys end routing and pass through to Windows. The ScreenKey input method is a bridge, not a full touch keyboard; use the keyboard picker to return to your usual one. Actual physical-keyboard handoff still needs broader testing on real devices.
+The bridge supports US-layout letters, digits and punctuation, editing and navigation keys, Ctrl+A/C/X/V, Ctrl+Z/Y, Ctrl+Backspace, Ctrl+Delete, and modified arrow navigation. Ctrl+V pastes from the **phone's** clipboard; Ctrl+C and Ctrl+X also use the phone clipboard. Undo, navigation, and clipboard actions depend on support in the target Android app. Other keyboard layouts, composed characters, and non-text fields are not supported reliably. The ScreenKey input method is a bridge, not a full touch keyboard; use the keyboard picker to return to your usual one.
 
 ## Current limitations
 
-- Keyboard routing is experimental; monitor selection is not available yet.
+- Keyboard routing is experimental and shortcut behavior varies across Android apps.
 - Pairing key rotation and selecting among multiple ADB devices are not yet exposed in the UI. To reset pairing, exit the companion, delete `%LOCALAPPDATA%\ScreenKeyBridge\pairing-key.txt`, and restart it; enter the new key on the phone.
 - Wireless ADB connections depend on the device and network remaining connected. Reconnect ADB if necessary; the companion retries the reverse mapping.
 - This is an early development build, not a security boundary against malicious software running as the same Windows or Android user.
