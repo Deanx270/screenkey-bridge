@@ -6,6 +6,7 @@ import android.Manifest;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
@@ -49,6 +50,14 @@ public final class MainActivity extends Activity {
     private boolean displaySyncInFlight;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean visible;
+    private final SharedPreferences.OnSharedPreferenceChangeListener pairingListener = (prefs, name) -> {
+        if (!"key".equals(name) || key == null) return;
+        String value = prefs.getString("key", "");
+        if (value != null && !value.equals(key.getText().toString())) {
+            key.setText(value); displaySyncPending = true;
+            if (visible) { loadDisplays(); syncDisplay(getPreferences(MODE_PRIVATE).getString("display", "")); }
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -61,12 +70,13 @@ public final class MainActivity extends Activity {
         title.setText("ScreenKey Bridge"); title.setTextSize(26);
         layout.addView(title);
         TextView instructions = new TextView(this);
-        instructions.setText("Enter the pairing key shown by the Windows tray app. Keep ADB connected.");
+        instructions.setText("On Windows, select Pair connected phone from the tray menu, or enter the pairing key below. Keep ADB connected.");
         layout.addView(instructions);
         key = new EditText(this);
         key.setSingleLine(true); key.setHint("Windows pairing key");
         key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setText(getPreferences(MODE_PRIVATE).getString("key", ""));
+        getPreferences(MODE_PRIVATE).registerOnSharedPreferenceChangeListener(pairingListener);
         layout.addView(key);
         TextView displayLabel = new TextView(this); displayLabel.setText("Screenshot display"); layout.addView(displayLabel);
         displayPicker = new Spinner(this); layout.addView(displayPicker);
@@ -233,11 +243,13 @@ public final class MainActivity extends Activity {
     };
     @Override protected void onResume() {
         super.onResume(); visible = true;
+        String savedKey = getPreferences(MODE_PRIVATE).getString("key", "");
+        if (savedKey != null && !savedKey.equals(key.getText().toString())) key.setText(savedKey);
         android.content.SharedPreferences captureState = getSharedPreferences("capture_status", MODE_PRIVATE);
         if (System.currentTimeMillis() - captureState.getLong("time", 0) < 60000) status.setText(captureState.getString("message", "Ready"));
         main.post(refresh); loadDisplays(); syncDisplay(getPreferences(MODE_PRIVATE).getString("display", ""));
     }
     @Override protected void onPause() { visible = false; main.removeCallbacks(refresh); super.onPause(); }
 
-    @Override protected void onDestroy() { visible = false; main.removeCallbacks(refresh); worker.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() { visible = false; getPreferences(MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(pairingListener); main.removeCallbacks(refresh); worker.shutdown(); super.onDestroy(); }
 }

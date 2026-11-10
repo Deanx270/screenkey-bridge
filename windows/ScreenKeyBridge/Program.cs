@@ -75,6 +75,7 @@ internal sealed class BridgeContext : ApplicationContext
         menu.Items.Add(connectionItem);
         menu.Items.Add(captureItem);
         menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
+        menu.Items.Add("Pair connected phone", null, async (_, _) => await PairPhone());
         menu.Items.Add("Reconnect ADB", null, async (_, _) => await ConnectAdb());
         menu.Items.Add("Capture screen to phone", null, (_, _) => _ = Task.Run(CaptureForPhone));
         startupItem.Click += (_, _) => ToggleStartup();
@@ -135,6 +136,19 @@ internal sealed class BridgeContext : ApplicationContext
         captureItem.Text = "Last screenshot: " + value;
     }
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) keyboard.Disconnect(); }
+
+    private async Task PairPhone()
+    {
+        string? serial = connectedSerial;
+        if (serial == null) { MessageBox.Show("Connect and authorize exactly one phone in ADB first.", "ScreenKey Bridge"); return; }
+        try
+        {
+            string result = await RunAdb($"-s {serial} shell am broadcast --include-stopped-packages -a com.screenkeybridge.action.PAIR -n com.screenkeybridge.app/.PairingReceiver --es key {token}");
+            if (!result.Contains("result=1", StringComparison.Ordinal)) throw new InvalidOperationException("The phone app did not confirm pairing. Install or update it and try again.");
+            MessageBox.Show("Phone paired. You can now use captures and keyboard routing.", "ScreenKey Bridge");
+        }
+        catch (Exception) { MessageBox.Show("Could not pair the phone. Check its ADB connection and that the current ScreenKey Bridge app is installed.", "ScreenKey Bridge"); }
+    }
 
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "ScreenKeyBridge";
@@ -244,7 +258,11 @@ internal sealed class BridgeContext : ApplicationContext
 
     private static async Task<string> RunAdb(string args)
     {
-        using var p = Process.Start(new ProcessStartInfo("adb", args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }) ?? throw new InvalidOperationException("Could not start adb.");
+        string bundled = Path.Combine(AppContext.BaseDirectory, "platform-tools", "adb.exe");
+        bool onPath = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => { try { return File.Exists(Path.Combine(part.Trim().Trim('"'), "adb.exe")); } catch (ArgumentException) { return false; } });
+        string executable = onPath || !File.Exists(bundled) ? "adb" : bundled;
+        using var p = Process.Start(new ProcessStartInfo(executable, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }) ?? throw new InvalidOperationException("Could not start adb.");
         Task<string> output = p.StandardOutput.ReadToEndAsync();
         Task<string> error = p.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));

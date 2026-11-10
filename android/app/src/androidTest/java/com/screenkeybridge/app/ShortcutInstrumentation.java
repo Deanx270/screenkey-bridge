@@ -28,6 +28,7 @@ public final class ShortcutInstrumentation extends Instrumentation {
             final int[] action = {0}, deleted = {-1}, contentFlags = {0};
             final InputContentInfo[] inserted = {null};
             final String[] before = {"hello world"}, selection = {null}, committed = {null};
+            StringBuilder typed = new StringBuilder();
             List<KeyEvent> keys = new ArrayList<>();
             InputConnection connection = (InputConnection)Proxy.newProxyInstance(InputConnection.class.getClassLoader(), new Class<?>[]{InputConnection.class}, (proxy, method, args) -> {
                 switch (method.getName()) {
@@ -35,7 +36,7 @@ public final class ShortcutInstrumentation extends Instrumentation {
                     case "getSelectedText": return selection[0];
                     case "getTextBeforeCursor": return before[0];
                     case "deleteSurroundingText": deleted[0] = (Integer)args[0]; return true;
-                    case "commitText": committed[0] = args[0].toString(); return true;
+                    case "commitText": committed[0] = args[0].toString(); typed.append(args[0]); return true;
                     case "sendKeyEvent": keys.add((KeyEvent)args[0]); return true;
                     case "commitContent": inserted[0] = (InputContentInfo)args[0]; contentFlags[0] = (Integer)args[1]; return true;
                     default: return method.getReturnType() == boolean.class ? true : null;
@@ -49,6 +50,27 @@ public final class ShortcutInstrumentation extends Instrumentation {
             selection[0] = "selected";
             require((Boolean)deliver.invoke(null, connection, "<ctrl:backspace>") && "".equals(committed[0]), "Ctrl+Backspace deletes selection");
             require((Boolean)deliver.invoke(null, connection, "<ctrl:z>") && keys.size() == 2 && keys.get(0).getKeyCode() == KeyEvent.KEYCODE_Z && keys.get(0).isCtrlPressed(), "Ctrl+Z forwards control modifier");
+            typed.setLength(0); keys.clear();
+            final int[] pasteClicks = {0};
+            final Throwable[] keyboardError = {null};
+            runOnMainSync(() -> {
+                try {
+                    EditorInfo info = new EditorInfo();
+                    TouchKeyboard keyboard = new TouchKeyboard(getTargetContext(), () -> connection, () -> info, () -> pasteClicks[0]++);
+                    require(keyboard.findViewWithTag("char_q").performClick(), "Touch Q");
+                    require(keyboard.findViewWithTag("shift").performClick(), "Touch shift");
+                    require(keyboard.findViewWithTag("char_q").performClick(), "Touch shifted Q");
+                    require(keyboard.findViewWithTag("mode_bottom").performClick(), "Touch symbols");
+                    require(keyboard.findViewWithTag("char_@").performClick(), "Touch symbol");
+                    require(keyboard.findViewWithTag("space").performClick(), "Touch space");
+                    require(keyboard.findViewWithTag("backspace").performClick(), "Touch backspace");
+                    require(keyboard.findViewWithTag("paste").performClick(), "Touch paste");
+                    require(keyboard.findViewWithTag("enter").performClick(), "Touch enter");
+                } catch (Throwable t) { keyboardError[0] = t; }
+            });
+            if (keyboardError[0] != null) throw keyboardError[0];
+            require("qQ@ ".equals(typed.toString()), "Touch keyboard text and shift");
+            require(pasteClicks[0] == 1 && keys.size() == 4 && keys.get(0).getKeyCode() == KeyEvent.KEYCODE_DEL && keys.get(2).getKeyCode() == KeyEvent.KEYCODE_ENTER, "Touch keyboard editing keys");
             if (checkClipboard) {
                 Context context = getTargetContext();
                 ClipboardManager manager = (ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);

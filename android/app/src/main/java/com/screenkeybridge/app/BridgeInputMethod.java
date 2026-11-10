@@ -34,6 +34,7 @@ public final class BridgeInputMethod extends InputMethodService {
     private volatile int generation;
     private volatile boolean ready;
     private TextView status;
+    private TouchKeyboard touchKeyboard;
     private long noticeUntil;
     private final Runnable poll = new Runnable() {
         @Override public void run() {
@@ -74,19 +75,27 @@ public final class BridgeInputMethod extends InputMethodService {
 
     @Override public View onCreateInputView() {
         LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int)(12 * getResources().getDisplayMetrics().density); layout.setPadding(pad, pad, pad, pad);
+        layout.setBackgroundColor(android.graphics.Color.rgb(225, 229, 234));
+        int pad = (int)(4 * getResources().getDisplayMetrics().density); layout.setPadding(pad, pad, pad, pad);
         status = new TextView(this); status.setText("ScreenKey Bridge keyboard"); layout.addView(status);
+        LinearLayout controls = new LinearLayout(this); controls.setOrientation(LinearLayout.HORIZONTAL);
         Button toggle = new Button(this); toggle.setText("Toggle PC / phone keyboard");
         toggle.setOnClickListener(v -> network.execute(() -> {
             try { request("toggle"); } catch (Exception ignored) { main.post(() -> status.setText("Could not reach the PC.")); }
-        })); layout.addView(toggle);
+        })); controls.addView(toggle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         Button change = new Button(this); change.setText("Choose another keyboard");
         change.setOnClickListener(v -> ((InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE)).showInputMethodPicker());
-        layout.addView(change); return layout;
+        controls.addView(change, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)); layout.addView(controls);
+        touchKeyboard = new TouchKeyboard(this, this::getCurrentInputConnection, this::getCurrentInputEditorInfo, () -> {
+            InputConnection c = getCurrentInputConnection();
+            if (c != null && !paste(this, c, getCurrentInputEditorInfo())) showNotice("This phone app did not accept paste.");
+        });
+        touchKeyboard.setEditor(getCurrentInputEditorInfo()); layout.addView(touchKeyboard); return layout;
     }
 
     @Override public void onStartInput(EditorInfo info, boolean restarting) {
         super.onStartInput(info, restarting);
+        if (touchKeyboard != null) touchKeyboard.setEditor(info);
         generation++; ready = getCurrentInputConnection() != null && !getPackageName().equals(info.packageName);
         if (ready) main.post(poll);
     }

@@ -6,15 +6,15 @@ ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB 
 
 - Windows 10 or 11, signed in to the interactive desktop; .NET 8 Desktop Runtime to run a framework-dependent build.
 - Android 10 or later. ADB must already be authorized and connected, over USB or wireless.
-- Android SDK platform-tools (`adb`) on the Windows PATH. Exactly one authorized ADB device should be connected.
+- Android SDK platform-tools (`adb`) on the Windows PATH, or the copy bundled with the Windows installer. Exactly one authorized ADB device should be connected.
 - For development: .NET 8 SDK, JDK 17, Android SDK platform 35 and Gradle 8.9.
 
 ## Build and run
 
 1. Build the companion: `dotnet build windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release`.
 2. Build the Android debug app: from `android`, run `gradle assembleDebug`, then install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
-3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Right-click its icon and select **Show pairing key and status**.
-4. Enter that key in the phone app, choose **All displays** or a specific monitor, and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery and are also copied to the phone clipboard. Each capture replaces the previous clipboard contents. Use **Refresh displays** after connecting or disconnecting monitors. If a selected monitor is unavailable, capture reports an error rather than silently switching to another monitor.
+3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Right-click its icon and select **Pair connected phone**. This requires one authorized ADB device with the Android app installed. Alternatively, select **Show pairing key and status** and enter the key manually.
+4. In the phone app, choose **All displays** or a specific monitor, and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery and are also copied to the phone clipboard. Each capture replaces the previous clipboard contents. Use **Refresh displays** after connecting or disconnecting monitors. If a selected monitor is unavailable, capture reports an error rather than silently switching to another monitor.
 
 ## Capture without opening the app
 
@@ -33,7 +33,7 @@ To start the companion when you sign in, right-click its tray icon and check **S
 
 When **All displays** is selected, the app captures the Windows virtual desktop as one PNG; gaps between monitors are included. Capture while locked, protected content, and some display-sharing configurations may not work. No guarantee is made about visibility in third-party sharing or security tools.
 
-The server binds only to Windows loopback and requires a random pairing key. The key is saved under your Windows user profile and in the Android app's private preferences; keep both devices and the key private. The tunnel is intended for a trusted ADB-connected device, not for exposing directly to a network. The Android app does not need broad storage access. Neither component sends screenshots to a cloud service.
+The server binds only to Windows loopback and requires a random pairing key. The key is saved under your Windows user profile and in the Android app's private preferences; keep both devices and the key private. Tray pairing sends the key through the already-authorized ADB shell to an Android receiver restricted to the shell/system; like ADB itself, it assumes a trusted PC and phone. The tunnel is intended for a trusted ADB-connected device, not for exposing directly to a network. The Android app does not need broad storage access. Neither component sends screenshots to a cloud service.
 
 ## Experimental keyboard routing
 
@@ -44,7 +44,20 @@ The server binds only to Windows loopback and requires a random pairing key. The
 
 The phone app reports PC, waiting, or phone state. Redirected events are held briefly in memory and never written to a log. Routing returns to the PC if the input method loses its field, the Windows session locks, the connection lease expires, the queue fills, or a toggle or emergency shortcut is used. Unsupported keys and shortcuts stay in phone mode and show a notice on the ScreenKey keyboard. Waiting requests expire after 30 seconds. On a dropped connection, keystrokes already in transit can be lost; they are not replayed. Windows can silently remove a stalled low-level keyboard hook, so this prototype cannot guarantee detection of every hook failure. Check the destination before typing sensitive text.
 
-The bridge supports US-layout letters, digits and punctuation, editing and navigation keys, Ctrl+A/C/X/V, Ctrl+Z/Y, Ctrl+Backspace, Ctrl+Delete, and modified arrow navigation. Ctrl+V pastes from the **phone's** clipboard; Ctrl+C and Ctrl+X also use the phone clipboard. For a captured image, the keyboard sends rich image content when the target explicitly supports it, or requests a normal paste otherwise. The receiving app must support image paste: plain text fields and URL bars generally cannot accept an image, and some apps don't implement image paste even in rich editors. Undo, navigation, and clipboard actions depend on support in the target Android app. Android may clear the clipboard after a period of time. Other keyboard layouts, composed characters, and non-text fields are not supported reliably. The ScreenKey input method is a bridge, not a full touch keyboard; use the keyboard picker to return to your usual one.
+The bridge supports US-layout letters, digits and punctuation, editing and navigation keys, Ctrl+A/C/X/V, Ctrl+Z/Y, Ctrl+Backspace, Ctrl+Delete, and modified arrow navigation. It also includes a basic on-screen QWERTY keyboard with Shift, numbers, symbols and a Paste key. Ctrl+V and the touch Paste key use the **phone's** clipboard; Ctrl+C and Ctrl+X also use the phone clipboard. For a captured image, the keyboard sends rich image content when the target explicitly supports it, or requests a normal paste otherwise. The receiving app must support image paste: plain text fields and URL bars generally cannot accept an image, and some apps don't implement image paste even in rich editors. Undo, navigation, and clipboard actions depend on support in the target Android app. Android may clear the clipboard after a period of time. Other keyboard layouts, predictive text, swipe typing, composed characters, and non-text fields are not supported reliably.
+
+## Building installable packages
+
+`scripts/build-windows-installer.ps1` builds a per-user x64 Windows installer in `dist`. It needs the .NET 8 SDK, Inno Setup's `ISCC.exe`, and Android platform-tools (including `NOTICE.txt`). Pass `-Dotnet`, `-Iscc`, and `-PlatformTools` if they are not on PATH. The installer bundles ADB and uses an existing PATH installation when available. Exit any running companion from its tray menu before running the installer. If sign-in startup was enabled for a portable copy, disable it from that copy before moving to the installed one, then enable it from the installed copy if desired. The installer is not code-signed.
+
+`scripts/build-android-apks.ps1` builds two APKs in `dist`; set `JAVA_HOME` and `ANDROID_HOME`, and pass `-Gradle` if Gradle 8.9 is not on PATH. The debug APK is signed with the current machine's Android debug key and can update the existing debug installation made with that same key. The release APK is signed with a separate private release key, so Android cannot install it over the debug-signed app. Do not uninstall an existing app just to change signing keys without first considering its local settings; gallery images are separate from those settings.
+
+The Android packaging script creates the release key and an encrypted password file once under `%LOCALAPPDATA%\ScreenKeyBridge\signing`; it never commits either to the repository. Keep a secure backup of the keystore **and its password** before distributing the release APK, because future updates must use the same key. The `.dpapi` password file is protected by the current Windows account and is not a portable backup by itself. While signed in to that Windows account, you can retrieve the password locally with the following commands and store it in a password manager. Never share the password or keystore publicly:
+
+```powershell
+$secret = Get-Content "$env:LOCALAPPDATA\ScreenKeyBridge\signing\release-password.dpapi" -Raw | ConvertTo-SecureString
+[System.Net.NetworkCredential]::new('', $secret).Password
+```
 
 ## Current limitations
 

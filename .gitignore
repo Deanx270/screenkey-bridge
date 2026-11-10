@@ -6,3 +6,6 @@ publish/
 local.properties
 *.user
 *.apk
+*.jks
+*.keystore
+dist/
