@@ -68,7 +68,7 @@ public final class MainActivity extends Activity {
             if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the Windows pairing key first."); return; }
             getPreferences(MODE_PRIVATE).edit().putString("key", secret).apply();
             worker.execute(() -> { try { String s = BridgeInputMethod.request(this, "toggle").getString("state"); runOnUiThread(() -> keyboardStatus.setText(modeLabel(s))); }
-                catch (Exception e) { runOnUiThread(() -> keyboardStatus.setText("Keyboard: PC unavailable")); } });
+                catch (Exception e) { runOnUiThread(() -> keyboardStatus.setText(connectionError(e))); } });
         }); layout.addView(toggle);
         keyboardStatus = new TextView(this); keyboardStatus.setText("Keyboard: checking"); layout.addView(keyboardStatus);
         capture.setOnClickListener(v -> {
@@ -92,12 +92,18 @@ public final class MainActivity extends Activity {
         if ("phone".equals(state)) return "Keyboard: phone";
         return "Keyboard: PC";
     }
+    private static String connectionError(Exception error) {
+        String message = error.getMessage();
+        if (message != null && message.contains("Pairing key rejected")) return "Connection: pairing key rejected; check the key.";
+        if (message != null && message.contains("Set the pairing key")) return "Connection: enter the PC pairing key first.";
+        return "Connection: PC unavailable. Check the companion and ADB connection.";
+    }
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             if (!visible) return;
             worker.execute(() -> {
                 try { String s = BridgeInputMethod.request(MainActivity.this, "state").getString("state"); runOnUiThread(() -> { if (visible) keyboardStatus.setText(modeLabel(s)); }); }
-                catch (Exception e) { runOnUiThread(() -> { if (visible) keyboardStatus.setText("Keyboard: PC unavailable"); }); }
+                catch (Exception e) { runOnUiThread(() -> { if (visible) keyboardStatus.setText(connectionError(e)); }); }
                 main.postDelayed(this, 1500);
             });
         }

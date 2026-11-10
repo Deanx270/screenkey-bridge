@@ -85,7 +85,8 @@ public final class BridgeInputMethod extends InputMethodService {
         c.setRequestMethod("POST"); c.setConnectTimeout(1000); c.setReadTimeout(1000);
         c.setRequestProperty("X-ScreenKey-Token", token);
         try {
-            if (c.getResponseCode() != 200) throw new Exception("PC rejected request");
+            int code = c.getResponseCode();
+            if (code != 200) throw new Exception(code == 401 ? "Pairing key rejected by PC" : "PC returned HTTP " + code);
             try (java.io.InputStream in = c.getInputStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
                 byte[] b = new byte[1024]; int n; while ((n = in.read(b)) != -1) { if (out.size() + n > 32768) throw new Exception("Response too large"); out.write(b, 0, n); }
                 return new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));

@@ -29,16 +29,24 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly HttpListener listener = new();
     private readonly CancellationTokenSource stop = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
-    private bool checking;
+    private int checking;
     private string status = "Starting";
     private readonly KeyboardRouter keyboard = new();
     private readonly string shortcutPath;
+    private readonly string devicePath;
+    private readonly string startupCommand;
+    private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
+    private readonly ToolStripMenuItem startupItem = new("Start at Windows sign-in");
+    private readonly Control ui = new();
     private int shortcut = 11;
 
     public BridgeContext()
     {
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
         Directory.CreateDirectory(dir);
+        devicePath = Path.Combine(dir, "last-wireless-device.txt");
+        startupCommand = GetStartupCommand();
+        _ = ui.Handle;
         shortcutPath = Path.Combine(dir, "keyboard-shortcut.txt");
         if (File.Exists(shortcutPath) && int.TryParse(File.ReadAllText(shortcutPath), out int saved) && saved is >= 1 and <= 11) shortcut = saved;
         keyboard.SetToggleFunctionKey(shortcut);
@@ -46,8 +54,12 @@ internal sealed class BridgeContext : ApplicationContext
         if (!File.Exists(path)) File.WriteAllText(path, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         token = File.ReadAllText(path).Trim();
         var menu = new ContextMenuStrip();
+        menu.Items.Add(connectionItem);
         menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
         menu.Items.Add("Reconnect ADB", null, async (_, _) => await ConnectAdb());
+        startupItem.Click += (_, _) => ToggleStartup();
+        menu.Items.Add(startupItem);
+        menu.Opening += (_, _) => RefreshStartup();
         menu.Items.Add("Toggle keyboard routing", null, (_, _) => keyboard.Toggle());
         var shortcutMenu = new ToolStripMenuItem("Keyboard shortcut (Ctrl+Alt)");
         for (int i = 1; i <= 11; i++)
@@ -80,22 +92,110 @@ internal sealed class BridgeContext : ApplicationContext
     private void ShowStatus() => MessageBox.Show($"{status}\nKeyboard: {keyboard.State()}\n\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) keyboard.Disconnect(); }
 
-    private async Task ConnectAdb()
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunValue = "ScreenKeyBridge";
+    private static string GetStartupCommand()
     {
-        if (checking) return;
-        checking = true;
+        string exe = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot find the running executable.");
+        if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            string assembly = Path.Combine(AppContext.BaseDirectory, "ScreenKeyBridge.dll");
+            if (!File.Exists(assembly)) throw new InvalidOperationException("Cannot find the running application.");
+            return $"\"{exe}\" \"{assembly}\"";
+        }
+        return $"\"{exe}\"";
+    }
+    private void RefreshStartup()
+    {
         try
         {
-            string devices = await RunAdb("devices");
-            var serials = devices.Split('\n').Select(line => line.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                .Where(parts => parts.Length >= 2 && parts[1] == "device").Select(parts => parts[0]).ToArray();
-            if (serials.Length != 1) { status = serials.Length == 0 ? "No authorized ADB device found." : "Connect exactly one ADB device."; return; }
-            await RunAdb($"-s {serials[0]} reverse tcp:{Port} tcp:{Port}");
-            status = $"ADB connected: {serials[0]}";
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey);
+            string? value = key?.GetValue(RunValue) as string;
+            startupItem.Checked = string.Equals(value, startupCommand, StringComparison.OrdinalIgnoreCase);
+            startupItem.Text = value != null && !startupItem.Checked ? "Start at Windows sign-in (another location configured)" : "Start at Windows sign-in";
         }
-        catch (Exception ex) { status = $"ADB error: {ex.Message}"; }
-        finally { checking = false; }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException) { startupItem.Checked = false; startupItem.Text = "Start at Windows sign-in (unavailable)"; }
     }
+    private void ToggleStartup()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey) ?? throw new IOException("Could not open the sign-in settings.");
+            string? value = key.GetValue(RunValue) as string;
+            if (value != null && !string.Equals(value, startupCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("A ScreenKey Bridge startup entry already points to another location. Remove that entry in Windows Startup settings before changing this one.", "ScreenKey Bridge");
+                return;
+            }
+            if (value == null) key.SetValue(RunValue, startupCommand, RegistryValueKind.String);
+            else key.DeleteValue(RunValue, false);
+            RefreshStartup();
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        { MessageBox.Show($"Could not change sign-in startup: {ex.Message}", "ScreenKey Bridge"); }
+    }
+    private void SetConnectionStatus(string value)
+    {
+        status = value;
+        if (ui.IsDisposed || !ui.IsHandleCreated) return;
+        if (ui.InvokeRequired) { try { ui.BeginInvoke(() => SetConnectionStatus(value)); } catch (InvalidOperationException) { } return; }
+        connectionItem.Text = "ADB: " + value;
+        string tip = "ScreenKey Bridge — " + value;
+        tray.Text = tip.Length > 63 ? tip[..60] + "…" : tip;
+    }
+    private static bool IsWirelessEndpoint(string value)
+    {
+        int colon = value.LastIndexOf(':');
+        return colon > 0 && IPAddress.TryParse(value[..colon], out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            && int.TryParse(value[(colon + 1)..], out int port) && port is >= 1 and <= 65535;
+    }
+
+    private async Task ConnectAdb()
+    {
+        if (Interlocked.Exchange(ref checking, 1) != 0) return;
+        try
+        {
+            SetConnectionStatus("Checking connection…");
+            string devices = await RunAdb("devices");
+            var entries = ParseDevices(devices);
+            var serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
+            if (serials.Length == 0 && !entries.Any(parts => parts[1] == "unauthorized") && File.Exists(devicePath))
+            {
+                string saved = (await File.ReadAllTextAsync(devicePath)).Trim();
+                if (IsWirelessEndpoint(saved))
+                {
+                    SetConnectionStatus("Reconnecting saved wireless device…");
+                    await RunAdb($"connect {saved}");
+                    entries = ParseDevices(await RunAdb("devices"));
+                    serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
+                }
+            }
+            if (serials.Length != 1)
+            {
+                string errorMessage = serials.Length > 1 ? "Multiple devices: connect only one." : entries.Any(parts => parts[1] == "unauthorized") ? "Phone unauthorized: approve USB debugging on phone." : entries.Any(parts => parts[1] == "offline") ? "Phone offline: check ADB and Wi-Fi." : "No ADB device: reconnect the phone.";
+                SetConnectionStatus(errorMessage); keyboard.Disconnect(); return;
+            }
+            await RunAdb($"-s {serials[0]} reverse tcp:{Port} tcp:{Port}");
+            string message = $"Connected to {serials[0]}";
+            if (IsWirelessEndpoint(serials[0]))
+            {
+                try
+                {
+                    if (!File.Exists(devicePath) || (await File.ReadAllTextAsync(devicePath)).Trim() != serials[0])
+                        await File.WriteAllTextAsync(devicePath, serials[0]);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { message += " (could not save for reconnect)"; }
+            }
+            SetConnectionStatus(message);
+        }
+        catch (Exception ex) { SetConnectionStatus($"Connection error: {ex.Message}"); keyboard.Disconnect(); }
+        finally { Interlocked.Exchange(ref checking, 0); }
+    }
+
+    private static string[][] ParseDevices(string output) => output.Split('\n')
+        .Select(line => line.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        .Where(parts => parts.Length >= 2 && parts[0] != "List" && parts[1] is "device" or "offline" or "unauthorized")
+        .ToArray();
 
     private static async Task<string> RunAdb(string args)
     {
@@ -159,7 +259,7 @@ internal sealed class BridgeContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        SystemEvents.SessionSwitch -= OnSessionSwitch; keyboard.Dispose(); timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); stop.Dispose();
+        SystemEvents.SessionSwitch -= OnSessionSwitch; keyboard.Dispose(); timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); ui.Dispose(); stop.Dispose();
         base.ExitThreadCore();
     }
 }
