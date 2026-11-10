@@ -1,16 +1,17 @@
 package com.screenkeybridge.app;
 
 import android.app.Activity;
-import android.content.ContentValues;
+import android.app.StatusBarManager;
+import android.Manifest;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.Context;
-import android.net.Uri;
 import android.os.Bundle;
-import android.os.Environment;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.MediaStore;
 import android.provider.Settings;
+import android.graphics.drawable.Icon;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -22,20 +23,17 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.view.inputmethod.InputMethodManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -47,6 +45,8 @@ public final class MainActivity extends Activity {
     private TextView keyboardStatus;
     private Spinner displayPicker;
     private boolean updatingDisplays;
+    private boolean displaySyncPending = true;
+    private boolean displaySyncInFlight;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean visible;
 
@@ -77,11 +77,30 @@ public final class MainActivity extends Activity {
         setDisplays(initial);
         displayPicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (!updatingDisplays) getPreferences(MODE_PRIVATE).edit().putString("display", ((DisplayChoice)parent.getItemAtPosition(position)).id).apply();
+                if (!updatingDisplays) {
+                    String idValue = ((DisplayChoice)parent.getItemAtPosition(position)).id;
+                    getPreferences(MODE_PRIVATE).edit().putString("display", idValue).apply();
+                    displaySyncPending = true;
+                    syncDisplay(idValue);
+                }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
         Button refreshDisplays = new Button(this); refreshDisplays.setText("Refresh displays"); refreshDisplays.setOnClickListener(v -> loadDisplays()); layout.addView(refreshDisplays);
+        Button addTile = new Button(this); addTile.setText("Add Quick Settings capture tile");
+        addTile.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= 33) {
+                StatusBarManager bar = getSystemService(StatusBarManager.class);
+                bar.requestAddTileService(new ComponentName(this, CaptureTile.class), "Capture PC screen", Icon.createWithResource(this, R.drawable.ic_capture), getMainExecutor(),
+                    result -> Toast.makeText(this, result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED || result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ? "Capture tile is available in Quick Settings." : "You can add Capture PC screen from Quick Settings edit.", Toast.LENGTH_LONG).show());
+            } else Toast.makeText(this, "Open Quick Settings, tap Edit, and add Capture PC screen.", Toast.LENGTH_LONG).show();
+        }); layout.addView(addTile);
+        Button notifications = new Button(this); notifications.setText("Enable capture notifications");
+        notifications.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 19);
+            else { Intent settings = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS); settings.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()); startActivity(settings); }
+        }); layout.addView(notifications);
         capture = new Button(this); capture.setText("Capture PC screen");
         layout.addView(capture);
         status = new TextView(this); status.setText("Ready"); layout.addView(status);
@@ -107,7 +126,7 @@ public final class MainActivity extends Activity {
             capture.setEnabled(false); status.setText("Capturing…");
             worker.execute(() -> {
                 String result;
-                try { saveCapture(secret, display); result = "Saved to Pictures/ScreenKey Bridge."; }
+                try { CaptureStorage.capture(this, secret, display, null); result = "Saved to Pictures/ScreenKey Bridge."; }
                 catch (Exception e) { result = "Capture failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }
                 String message = result;
                 runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { status.setText(message); capture.setEnabled(true); } });
@@ -153,6 +172,32 @@ public final class MainActivity extends Activity {
             } catch (Exception e) { runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) status.setText("Display list unavailable. Check the PC connection or refresh displays."); }); }
         });
     }
+    private void syncDisplay(String display) {
+        String secret = key.getText().toString().trim();
+        if (!displaySyncPending || displaySyncInFlight || !secret.matches("[0-9A-F]{64}")) return;
+        displaySyncInFlight = true;
+        worker.execute(() -> {
+            HttpURLConnection c = null;
+            boolean success = false;
+            try {
+                String url = "http://127.0.0.1:38473/capture/preference?display=" + URLEncoder.encode(display, "UTF-8");
+                c = (HttpURLConnection)new URL(url).openConnection(); c.setRequestMethod("POST"); c.setConnectTimeout(3000); c.setReadTimeout(3000);
+                c.setRequestProperty("X-ScreenKey-Token", secret);
+                if (c.getResponseCode() != 200) throw new Exception("Display selection not saved on PC");
+                success = true;
+            } catch (Exception ignored) { }
+            finally { if (c != null) c.disconnect(); }
+            boolean synced = success;
+            runOnUiThread(() -> {
+                displaySyncInFlight = false;
+                if (isFinishing() || isDestroyed()) return;
+                String current = getPreferences(MODE_PRIVATE).getString("display", "");
+                displaySyncPending = !synced || !display.equals(current);
+                if (!synced) status.setText("Display selection will sync when the PC reconnects.");
+                else if (displaySyncPending) syncDisplay(current);
+            });
+        });
+    }
     private JSONObject requestDisplays(String secret) throws Exception {
         HttpURLConnection c = (HttpURLConnection)new URL("http://127.0.0.1:38473/displays").openConnection();
         c.setRequestMethod("POST"); c.setConnectTimeout(3000); c.setReadTimeout(3000); c.setRequestProperty("X-ScreenKey-Token", secret);
@@ -180,45 +225,19 @@ public final class MainActivity extends Activity {
         @Override public void run() {
             if (!visible) return;
             worker.execute(() -> {
-                try { String s = BridgeInputMethod.request(MainActivity.this, "state").getString("state"); runOnUiThread(() -> { if (visible) keyboardStatus.setText(modeLabel(s)); }); }
+                try { String s = BridgeInputMethod.request(MainActivity.this, "state").getString("state"); runOnUiThread(() -> { if (visible) { keyboardStatus.setText(modeLabel(s)); if (displaySyncPending) syncDisplay(getPreferences(MODE_PRIVATE).getString("display", "")); } }); }
                 catch (Exception e) { runOnUiThread(() -> { if (visible) keyboardStatus.setText(connectionError(e)); }); }
                 main.postDelayed(this, 1500);
             });
         }
     };
-    @Override protected void onResume() { super.onResume(); visible = true; main.post(refresh); loadDisplays(); }
+    @Override protected void onResume() {
+        super.onResume(); visible = true;
+        android.content.SharedPreferences captureState = getSharedPreferences("capture_status", MODE_PRIVATE);
+        if (System.currentTimeMillis() - captureState.getLong("time", 0) < 60000) status.setText(captureState.getString("message", "Ready"));
+        main.post(refresh); loadDisplays(); syncDisplay(getPreferences(MODE_PRIVATE).getString("display", ""));
+    }
     @Override protected void onPause() { visible = false; main.removeCallbacks(refresh); super.onPause(); }
 
-    private void saveCapture(String secret, String display) throws Exception {
-        String url = "http://127.0.0.1:38473/capture" + (display.isEmpty() ? "" : "?display=" + URLEncoder.encode(display, "UTF-8"));
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        connection.setRequestMethod("POST"); connection.setConnectTimeout(5000); connection.setReadTimeout(30000);
-        connection.setRequestProperty("X-ScreenKey-Token", secret);
-        Uri item = null;
-        try {
-            int code = connection.getResponseCode();
-            if (code != 200) throw new Exception(code == 401 ? "pairing key rejected" : code == 400 ? "selected display unavailable; refresh displays" : "PC returned HTTP " + code);
-            if (!"image/png".equalsIgnoreCase(connection.getContentType())) throw new Exception("unexpected response from PC");
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "ScreenKey_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date()) + ".png");
-            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-            values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ScreenKey Bridge");
-            values.put(MediaStore.Images.Media.IS_PENDING, 1);
-            item = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (item == null) throw new Exception("could not create gallery image");
-            try (InputStream in = connection.getInputStream(); OutputStream out = getContentResolver().openOutputStream(item)) {
-                if (out == null) throw new Exception("could not write gallery image");
-                byte[] buffer = new byte[32768]; int n; long total = 0;
-                while ((n = in.read(buffer)) != -1) { total += n; if (total > 100L * 1024 * 1024) throw new Exception("image too large"); out.write(buffer, 0, n); }
-                if (total == 0 || (connection.getContentLengthLong() >= 0 && total != connection.getContentLengthLong())) throw new Exception("incomplete image");
-            }
-            ContentValues publish = new ContentValues(); publish.put(MediaStore.Images.Media.IS_PENDING, 0);
-            if (getContentResolver().update(item, publish, null, null) != 1) throw new Exception("could not publish gallery image");
-            item = null;
-        } finally {
-            if (item != null) getContentResolver().delete(item, null, null);
-            connection.disconnect();
-        }
-    }
     @Override protected void onDestroy() { visible = false; main.removeCallbacks(refresh); worker.shutdown(); super.onDestroy(); }
 }

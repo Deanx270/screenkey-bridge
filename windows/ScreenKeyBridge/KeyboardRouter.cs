@@ -16,6 +16,8 @@ internal sealed class KeyboardRouter : IDisposable
     private long armedAt;
     private bool phoneReady;
     private int toggleKey = 0x7A;
+    private int captureKey = 0x79;
+    public Action? CaptureRequested { get; set; }
     private const int LeaseMs = 2000;
     private const int ArmMs = 30000;
 
@@ -50,6 +52,11 @@ internal sealed class KeyboardRouter : IDisposable
         if (number < 1 || number > 11) throw new ArgumentOutOfRangeException(nameof(number));
         lock (gate) toggleKey = 0x6F + number;
     }
+    public void SetCaptureFunctionKey(int number)
+    {
+        if (number < 1 || number > 11) throw new ArgumentOutOfRangeException(nameof(number));
+        lock (gate) captureKey = 0x6F + number;
+    }
     public string[] Heartbeat()
     {
         lock (gate)
@@ -82,6 +89,11 @@ internal sealed class KeyboardRouter : IDisposable
             if (up && swallowed.Remove(key)) return (IntPtr)1;
             bool ctrl = held.Contains(0x11) || held.Contains(0xA2) || held.Contains(0xA3);
             bool alt = held.Contains(0x12) || held.Contains(0xA4) || held.Contains(0xA5);
+            if (down && ctrl && alt && key == captureKey)
+            {
+                if (firstDown) ThreadPool.QueueUserWorkItem(_ => CaptureRequested?.Invoke());
+                swallowed.Add(key); return (IntPtr)1;
+            }
             if (down && ctrl && alt && (key == toggleKey || key == 0x7B))
             {
                 if (firstDown) { if (key == 0x7B) Reset(); else Toggle(); }

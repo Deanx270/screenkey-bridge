@@ -33,12 +33,23 @@ internal sealed class BridgeContext : ApplicationContext
     private string status = "Starting";
     private readonly KeyboardRouter keyboard = new();
     private readonly string shortcutPath;
+    private readonly string captureShortcutPath;
+    private readonly string displayPreferencePath;
     private readonly string devicePath;
     private readonly string startupCommand;
     private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
     private readonly ToolStripMenuItem startupItem = new("Start at Windows sign-in");
+    private readonly ToolStripMenuItem captureItem = new("Last screenshot: none") { Enabled = false };
     private readonly Control ui = new();
     private int shortcut = 11;
+    private int captureShortcut = 10;
+    private string captureStatus = "none";
+    private volatile string? connectedSerial;
+    private readonly object captureGate = new();
+    private string selectedDisplay = "";
+    private PendingCapture? pendingCapture;
+    private int captureBusy;
+    private sealed record PendingCapture(string Id, byte[] Image, TaskCompletionSource<bool> Completion);
 
     public BridgeContext()
     {
@@ -48,15 +59,24 @@ internal sealed class BridgeContext : ApplicationContext
         startupCommand = GetStartupCommand();
         _ = ui.Handle;
         shortcutPath = Path.Combine(dir, "keyboard-shortcut.txt");
+        captureShortcutPath = Path.Combine(dir, "capture-shortcut.txt");
+        displayPreferencePath = Path.Combine(dir, "capture-display.txt");
+        if (File.Exists(displayPreferencePath)) selectedDisplay = File.ReadAllText(displayPreferencePath).Trim();
         if (File.Exists(shortcutPath) && int.TryParse(File.ReadAllText(shortcutPath), out int saved) && saved is >= 1 and <= 11) shortcut = saved;
+        if (File.Exists(captureShortcutPath) && int.TryParse(File.ReadAllText(captureShortcutPath), out int captureSaved) && captureSaved is >= 1 and <= 11) captureShortcut = captureSaved;
+        if (captureShortcut == shortcut) captureShortcut = shortcut == 10 ? 9 : 10;
         keyboard.SetToggleFunctionKey(shortcut);
+        keyboard.SetCaptureFunctionKey(captureShortcut);
+        keyboard.CaptureRequested = () => _ = CaptureForPhone();
         string path = Path.Combine(dir, "pairing-key.txt");
         if (!File.Exists(path)) File.WriteAllText(path, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         token = File.ReadAllText(path).Trim();
         var menu = new ContextMenuStrip();
         menu.Items.Add(connectionItem);
+        menu.Items.Add(captureItem);
         menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
         menu.Items.Add("Reconnect ADB", null, async (_, _) => await ConnectAdb());
+        menu.Items.Add("Capture screen to phone", null, (_, _) => _ = Task.Run(CaptureForPhone));
         startupItem.Click += (_, _) => ToggleStartup();
         menu.Items.Add(startupItem);
         menu.Opening += (_, _) => RefreshStartup();
@@ -68,6 +88,7 @@ internal sealed class BridgeContext : ApplicationContext
             var item = new ToolStripMenuItem($"F{i}") { Checked = i == shortcut };
             item.Click += (_, _) => {
                 try {
+                    if (choice == captureShortcut) { MessageBox.Show("Choose a different key from the screenshot shortcut.", "ScreenKey Bridge"); return; }
                     File.WriteAllText(shortcutPath, choice.ToString());
                     shortcut = choice; keyboard.SetToggleFunctionKey(choice);
                     foreach (ToolStripMenuItem entry in shortcutMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
@@ -76,6 +97,22 @@ internal sealed class BridgeContext : ApplicationContext
             shortcutMenu.DropDownItems.Add(item);
         }
         menu.Items.Add(shortcutMenu);
+        var captureMenu = new ToolStripMenuItem("Screenshot shortcut (Ctrl+Alt)");
+        for (int i = 1; i <= 11; i++)
+        {
+            int choice = i;
+            var item = new ToolStripMenuItem($"F{i}") { Checked = i == captureShortcut };
+            item.Click += (_, _) => {
+                try {
+                    if (choice == shortcut) { MessageBox.Show("Choose a different key from the keyboard shortcut.", "ScreenKey Bridge"); return; }
+                    File.WriteAllText(captureShortcutPath, choice.ToString());
+                    captureShortcut = choice; keyboard.SetCaptureFunctionKey(choice);
+                    foreach (ToolStripMenuItem entry in captureMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
+                } catch (IOException ex) { MessageBox.Show($"Could not save shortcut: {ex.Message}", "ScreenKey Bridge"); }
+            };
+            captureMenu.DropDownItems.Add(item);
+        }
+        menu.Items.Add(captureMenu);
         menu.Items.Add("Return keyboard to PC (Ctrl+Alt+F12)", null, (_, _) => keyboard.Disconnect());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray = new NotifyIcon { Text = "ScreenKey Bridge", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
@@ -89,7 +126,14 @@ internal sealed class BridgeContext : ApplicationContext
         _ = ConnectAdb();
     }
 
-    private void ShowStatus() => MessageBox.Show($"{status}\nKeyboard: {keyboard.State()}\n\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void ShowStatus() => MessageBox.Show($"{status}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void SetCaptureStatus(string value)
+    {
+        captureStatus = value;
+        if (ui.IsDisposed || !ui.IsHandleCreated) return;
+        if (ui.InvokeRequired) { try { ui.BeginInvoke(() => SetCaptureStatus(value)); } catch (InvalidOperationException) { } return; }
+        captureItem.Text = "Last screenshot: " + value;
+    }
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) keyboard.Disconnect(); }
 
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -173,9 +217,10 @@ internal sealed class BridgeContext : ApplicationContext
             if (serials.Length != 1)
             {
                 string errorMessage = serials.Length > 1 ? "Multiple devices: connect only one." : entries.Any(parts => parts[1] == "unauthorized") ? "Phone unauthorized: approve USB debugging on phone." : entries.Any(parts => parts[1] == "offline") ? "Phone offline: check ADB and Wi-Fi." : "No ADB device: reconnect the phone.";
-                SetConnectionStatus(errorMessage); keyboard.Disconnect(); return;
+                connectedSerial = null; SetConnectionStatus(errorMessage); keyboard.Disconnect(); return;
             }
             await RunAdb($"-s {serials[0]} reverse tcp:{Port} tcp:{Port}");
+            connectedSerial = serials[0];
             string message = $"Connected to {serials[0]}";
             if (IsWirelessEndpoint(serials[0]))
             {
@@ -188,7 +233,7 @@ internal sealed class BridgeContext : ApplicationContext
             }
             SetConnectionStatus(message);
         }
-        catch (Exception ex) { SetConnectionStatus($"Connection error: {ex.Message}"); keyboard.Disconnect(); }
+        catch (Exception ex) { connectedSerial = null; SetConnectionStatus($"Connection error: {ex.Message}"); keyboard.Disconnect(); }
         finally { Interlocked.Exchange(ref checking, 0); }
     }
 
@@ -207,6 +252,53 @@ internal sealed class BridgeContext : ApplicationContext
         catch (OperationCanceledException) { p.Kill(true); throw new TimeoutException("ADB did not respond."); }
         if (p.ExitCode != 0) throw new InvalidOperationException((await error).Trim());
         return await output;
+    }
+
+    private static byte[] CaptureBytes(string displayName)
+    {
+        Rectangle bounds;
+        if (string.IsNullOrEmpty(displayName)) bounds = SystemInformation.VirtualScreen;
+        else
+        {
+            var display = Screen.AllScreens.FirstOrDefault(screen => string.Equals(screen.DeviceName, displayName, StringComparison.Ordinal));
+            if (display == null) throw new ArgumentException("Selected display is unavailable.");
+            bounds = display.Bounds;
+        }
+        using var image = new Bitmap(bounds.Width, bounds.Height);
+        using (var graphics = Graphics.FromImage(image)) graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+        using var stream = new MemoryStream();
+        image.Save(stream, ImageFormat.Png);
+        if (stream.Length > 100L * 1024 * 1024) throw new IOException("Screenshot is too large.");
+        return stream.ToArray();
+    }
+
+    private async Task CaptureForPhone()
+    {
+        if (Interlocked.Exchange(ref captureBusy, 1) != 0) { SetCaptureStatus("capture already in progress"); return; }
+        PendingCapture? request = null;
+        try
+        {
+            string? serial = connectedSerial;
+            if (serial == null) throw new InvalidOperationException("phone is not connected");
+            string display;
+            lock (captureGate) display = selectedDisplay;
+            // This method runs on a worker queued directly by the keyboard hook. Capture before starting ADB.
+            byte[] image = CaptureBytes(display);
+            request = new PendingCapture(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), image, new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+            lock (captureGate) pendingCapture = request;
+            SetCaptureStatus("sending to phone…");
+            string output = await RunAdb($"-s {serial} shell am start-foreground-service -n com.screenkeybridge.app/.CaptureService --es request_id {request.Id}");
+            if (output.Contains("Error:", StringComparison.OrdinalIgnoreCase) || output.Contains("Exception", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("phone could not start capture service");
+            if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(30))) != request.Completion.Task)
+                throw new TimeoutException("phone did not confirm the save");
+            SetCaptureStatus(await request.Completion.Task ? "saved to phone" : "phone could not save; check phone notification");
+        }
+        catch (Exception ex) { SetCaptureStatus("failed: " + ex.Message); }
+        finally
+        {
+            lock (captureGate) { if (ReferenceEquals(pendingCapture, request)) pendingCapture = null; }
+            Interlocked.Exchange(ref captureBusy, 0);
+        }
     }
 
     private async Task Serve()
@@ -229,6 +321,39 @@ internal sealed class BridgeContext : ApplicationContext
             if (actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
             if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
             string? route = context.Request.Url?.AbsolutePath;
+            if (route == "/capture/request")
+            {
+                _ = Task.Run(CaptureForPhone);
+                context.Response.StatusCode = 202;
+                return;
+            }
+            if (route == "/capture/status")
+            {
+                byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { state = captureStatus });
+                context.Response.ContentType = "application/json"; context.Response.ContentLength64 = json.Length;
+                await context.Response.OutputStream.WriteAsync(json); return;
+            }
+            if (route == "/capture/preference")
+            {
+                string display = context.Request.QueryString["display"] ?? "";
+                if (display.Length > 256 || display.Contains('\r') || display.Contains('\n')) { context.Response.StatusCode = 400; return; }
+                string existing; lock (captureGate) existing = selectedDisplay;
+                if (!string.Equals(existing, display, StringComparison.Ordinal)) await File.WriteAllTextAsync(displayPreferencePath, display);
+                lock (captureGate) selectedDisplay = display;
+                return;
+            }
+            if (route == "/capture/pending" || route == "/capture/ack")
+            {
+                string? id = context.Request.QueryString["id"];
+                PendingCapture? pending;
+                lock (captureGate) pending = pendingCapture;
+                if (pending == null || !string.Equals(pending.Id, id, StringComparison.Ordinal)) { context.Response.StatusCode = 404; return; }
+                if (route == "/capture/ack") { pending.Completion.TrySetResult(context.Request.QueryString["ok"] == "1"); return; }
+                context.Response.ContentType = "image/png";
+                context.Response.ContentLength64 = pending.Image.Length;
+                await context.Response.OutputStream.WriteAsync(pending.Image);
+                return;
+            }
             if (route == "/displays")
             {
                 var displays = Screen.AllScreens.Select((screen, index) => new {
@@ -255,23 +380,12 @@ internal sealed class BridgeContext : ApplicationContext
                 return;
             }
             if (route != "/capture") { context.Response.StatusCode = 404; return; }
-            string? selectedDisplay = context.Request.QueryString["display"];
-            Rectangle bounds;
-            if (string.IsNullOrEmpty(selectedDisplay)) bounds = SystemInformation.VirtualScreen;
-            else
-            {
-                var display = Screen.AllScreens.FirstOrDefault(screen => string.Equals(screen.DeviceName, selectedDisplay, StringComparison.Ordinal));
-                if (display == null) { context.Response.StatusCode = 400; return; }
-                bounds = display.Bounds;
-            }
-            using var image = new Bitmap(bounds.Width, bounds.Height);
-            using (var graphics = Graphics.FromImage(image)) graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
-            using var stream = new MemoryStream();
-            image.Save(stream, ImageFormat.Png);
+            byte[] png;
+            try { png = CaptureBytes(context.Request.QueryString["display"] ?? ""); }
+            catch (ArgumentException) { context.Response.StatusCode = 400; return; }
             context.Response.ContentType = "image/png";
-            context.Response.ContentLength64 = stream.Length;
-            stream.Position = 0;
-            await stream.CopyToAsync(context.Response.OutputStream);
+            context.Response.ContentLength64 = png.Length;
+            await context.Response.OutputStream.WriteAsync(png);
         }
         catch (Exception) { try { context.Response.StatusCode = 500; } catch (ObjectDisposedException) { } }
         finally { context.Response.Close(); }

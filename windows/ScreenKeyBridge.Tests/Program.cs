@@ -10,7 +10,9 @@ const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
 void Set(string name, object value) => type.GetField(name, flags)!.SetValue(router, value);
 Set("gate", new object()); Set("queue", new Queue<string>());
 Set("held", new HashSet<int>()); Set("swallowed", new HashSet<int>());
-Set("armed", true); Set("phoneReady", true); Set("lastHeartbeat", Environment.TickCount64); Set("toggleKey", 0x7A);
+Set("armed", true); Set("phoneReady", true); Set("lastHeartbeat", Environment.TickCount64); Set("toggleKey", 0x7A); Set("captureKey", 0x79);
+using var captured = new ManualResetEventSlim();
+type.GetProperty("CaptureRequested")!.SetValue(router, (Action)(() => captured.Set()));
 var keyInfo = type.GetNestedType("Kbd", BindingFlags.NonPublic)!;
 var hook = type.GetMethod("OnKey", flags)!;
 void Key(uint key, bool down)
@@ -35,6 +37,11 @@ string state = (string)type.GetMethod("State")!.Invoke(router, null)!;
 var events = (string[])type.GetMethod("Heartbeat")!.Invoke(router, null)!;
 string[] expected = { "<ctrl:a>", "<ctrl:v>", "<ctrl:z>", "<ctrl:backspace>", "<ctrl:shift:left>", "<unsupported>" };
 if (state != "phone" || !events.SequenceEqual(expected)) throw new Exception($"Unexpected mode or events: {state}, {string.Join(", ", events)}");
+Press(0x79); // Ctrl+Alt+F10 captures without changing destination.
+if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "phone") throw new Exception("Capture shortcut did not fire in phone mode.");
 Press(0x7B); // Ctrl+Alt+F12
 if ((string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Emergency shortcut did not return to PC.");
+captured.Reset();
+Press(0x79); // The capture shortcut also works while typing stays on the PC.
+if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Capture shortcut did not fire in PC mode.");
 Console.WriteLine("Keyboard routing regression checks passed.");
