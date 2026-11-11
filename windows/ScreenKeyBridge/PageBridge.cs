@@ -82,7 +82,7 @@ internal static class EdgeBrowserLink
         if (!File.Exists(Path.Combine(extension, "manifest.json"))) throw new InvalidOperationException("Edge extension files are missing. Reinstall ScreenKey Bridge.");
         Configure();
         Process.Start(new ProcessStartInfo("explorer.exe", $"\"{extension}\"") { UseShellExecute = true });
-        MessageBox.Show("In Edge, open edge://extensions. If ScreenKey Bridge page saving is already installed, choose Reload. Otherwise turn on Developer mode, select Load unpacked, and choose the folder just opened.\n\nThe extension needs access to pages you request to save.", "Set up page saving");
+        MessageBox.Show("In Edge, open edge://extensions. If the ScreenKey Bridge extension is already installed, choose Reload. Otherwise turn on Developer mode, select Load unpacked, and choose the folder just opened.\n\nThe extension needs access to pages you request to save.", "Set up page saving");
     }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
