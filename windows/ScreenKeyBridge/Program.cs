@@ -30,11 +30,13 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly CancellationTokenSource stop = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
     private int checking;
+    private int disconnecting;
     private string status = "Starting";
     private readonly KeyboardRouter keyboard = new();
     private readonly string shortcutPath;
     private readonly string captureShortcutPath;
     private readonly string displayPreferencePath;
+    private readonly string androidTargetPath;
     private readonly string devicePath;
     private readonly string startupCommand;
     private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
@@ -45,6 +47,8 @@ internal sealed class BridgeContext : ApplicationContext
     private int captureShortcut = 10;
     private string captureStatus = "none";
     private volatile string? connectedSerial;
+    private volatile bool reconnectPaused;
+    private volatile string androidPackage = "com.screenkeybridge.app";
     private readonly object captureGate = new();
     private string selectedDisplay = "";
     private PendingCapture? pendingCapture;
@@ -56,6 +60,8 @@ internal sealed class BridgeContext : ApplicationContext
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
         Directory.CreateDirectory(dir);
         devicePath = Path.Combine(dir, "last-wireless-device.txt");
+        androidTargetPath = Path.Combine(dir, "android-target.txt");
+        if (File.Exists(androidTargetPath) && File.ReadAllText(androidTargetPath).Trim() == "com.screenkeybridge.app.preview") androidPackage = "com.screenkeybridge.app.preview";
         startupCommand = GetStartupCommand();
         _ = ui.Handle;
         shortcutPath = Path.Combine(dir, "keyboard-shortcut.txt");
@@ -75,8 +81,24 @@ internal sealed class BridgeContext : ApplicationContext
         menu.Items.Add(connectionItem);
         menu.Items.Add(captureItem);
         menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
+        menu.Items.Add("Connect a phone…", null, (_, _) => { using var form = new ConnectionSetupForm(RunAdb, ResumeConnection, PairPhone); form.ShowDialog(); });
         menu.Items.Add("Pair connected phone", null, async (_, _) => await PairPhone());
-        menu.Items.Add("Reconnect ADB", null, async (_, _) => await ConnectAdb());
+        var targetMenu = new ToolStripMenuItem("Android app installation");
+        foreach (var target in new[] { (Name: "Normal app", Package: "com.screenkeybridge.app"), (Name: "Side-by-side preview", Package: "com.screenkeybridge.app.preview") })
+        {
+            var item = new ToolStripMenuItem(target.Name) { Checked = androidPackage == target.Package };
+            item.Click += (_, _) => {
+                try {
+                    File.WriteAllText(androidTargetPath, target.Package);
+                    androidPackage = target.Package; keyboard.Disconnect();
+                    foreach (ToolStripMenuItem entry in targetMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
+                } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { MessageBox.Show($"Could not save Android app selection: {ex.Message}", "ScreenKey Bridge"); }
+            };
+            targetMenu.DropDownItems.Add(item);
+        }
+        menu.Items.Add(targetMenu);
+        menu.Items.Add("Reconnect ADB", null, async (_, _) => await ResumeConnection());
+        menu.Items.Add("Disconnect wireless phone", null, async (_, _) => await DisconnectWireless());
         menu.Items.Add("Capture screen to phone", null, (_, _) => _ = Task.Run(CaptureForPhone));
         startupItem.Click += (_, _) => ToggleStartup();
         menu.Items.Add(startupItem);
@@ -127,7 +149,7 @@ internal sealed class BridgeContext : ApplicationContext
         _ = ConnectAdb();
     }
 
-    private void ShowStatus() => MessageBox.Show($"{status}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void ShowStatus() => MessageBox.Show($"{status}\nAndroid app: {(androidPackage.EndsWith(".preview", StringComparison.Ordinal) ? "side-by-side preview" : "normal")}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
     private void SetCaptureStatus(string value)
     {
         captureStatus = value;
@@ -139,15 +161,39 @@ internal sealed class BridgeContext : ApplicationContext
 
     private async Task PairPhone()
     {
-        string? serial = connectedSerial;
-        if (serial == null) { MessageBox.Show("Connect and authorize exactly one phone in ADB first.", "ScreenKey Bridge"); return; }
         try
         {
-            string result = await RunAdb($"-s {serial} shell am broadcast --include-stopped-packages -a com.screenkeybridge.action.PAIR -n com.screenkeybridge.app/.PairingReceiver --es key {token}");
+            var serials = ParseDevices(await RunAdb("devices")).Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
+            if (serials.Length != 1) { MessageBox.Show("Connect and authorize exactly one phone in ADB first.", "ScreenKey Bridge"); return; }
+            string serial = serials[0];
+            string target = androidPackage;
+            string result = await RunAdb($"-s {serial} shell am broadcast --include-stopped-packages -a com.screenkeybridge.action.PAIR -n {target}/com.screenkeybridge.app.PairingReceiver --es key {token}");
             if (!result.Contains("result=1", StringComparison.Ordinal)) throw new InvalidOperationException("The phone app did not confirm pairing. Install or update it and try again.");
-            MessageBox.Show("Phone paired. You can now use captures and keyboard routing.", "ScreenKey Bridge");
+            MessageBox.Show($"Phone paired with the {(target.EndsWith(".preview", StringComparison.Ordinal) ? "preview" : "normal")} app. Select its keyboard on the phone to use keyboard routing.", "ScreenKey Bridge");
         }
         catch (Exception) { MessageBox.Show("Could not pair the phone. Check its ADB connection and that the current ScreenKey Bridge app is installed.", "ScreenKey Bridge"); }
+    }
+    private Task ResumeConnection()
+    {
+        if (Volatile.Read(ref disconnecting) != 0) { SetConnectionStatus("Wait for disconnection to finish."); return Task.CompletedTask; }
+        reconnectPaused = false; return ConnectAdb();
+    }
+    private async Task DisconnectWireless()
+    {
+        if (Interlocked.Exchange(ref disconnecting, 1) != 0) return;
+        reconnectPaused = true; connectedSerial = null; keyboard.Disconnect();
+        try
+        {
+            for (int i = 0; i < 60 && Volatile.Read(ref checking) != 0; i++) await Task.Delay(200);
+            if (Volatile.Read(ref checking) != 0) throw new TimeoutException("wait for ADB checking to finish and try again");
+            var wireless = ParseDevices(await RunAdb("devices"))
+                .Where(parts => IsWirelessEndpoint(parts[0])).Select(parts => parts[0]).ToArray();
+            if (wireless.Length > 1) { SetConnectionStatus("Reconnect paused; multiple wireless devices found."); return; }
+            if (wireless.Length == 1) await RunAdb($"disconnect {wireless[0]}");
+            SetConnectionStatus("Wireless connection paused. Use Reconnect ADB to resume.");
+        }
+        catch (Exception ex) { SetConnectionStatus("Disconnect failed: " + ex.Message); }
+        finally { Interlocked.Exchange(ref disconnecting, 0); }
     }
 
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -210,11 +256,13 @@ internal sealed class BridgeContext : ApplicationContext
 
     private async Task ConnectAdb()
     {
+        if (reconnectPaused) return;
         if (Interlocked.Exchange(ref checking, 1) != 0) return;
         try
         {
             SetConnectionStatus("Checking connection…");
             string devices = await RunAdb("devices");
+            if (reconnectPaused) return;
             var entries = ParseDevices(devices);
             var serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
             if (serials.Length == 0 && !entries.Any(parts => parts[1] == "unauthorized") && File.Exists(devicePath))
@@ -224,6 +272,7 @@ internal sealed class BridgeContext : ApplicationContext
                 {
                     SetConnectionStatus("Reconnecting saved wireless device…");
                     await RunAdb($"connect {saved}");
+                    if (reconnectPaused) return;
                     entries = ParseDevices(await RunAdb("devices"));
                     serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
                 }
@@ -234,6 +283,7 @@ internal sealed class BridgeContext : ApplicationContext
                 connectedSerial = null; SetConnectionStatus(errorMessage); keyboard.Disconnect(); return;
             }
             await RunAdb($"-s {serials[0]} reverse tcp:{Port} tcp:{Port}");
+            if (reconnectPaused) return;
             connectedSerial = serials[0];
             string message = $"Connected to {serials[0]}";
             if (IsWirelessEndpoint(serials[0]))
@@ -305,7 +355,8 @@ internal sealed class BridgeContext : ApplicationContext
             request = new PendingCapture(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), image, new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
             lock (captureGate) pendingCapture = request;
             SetCaptureStatus("sending to phone…");
-            string output = await RunAdb($"-s {serial} shell am start-foreground-service -n com.screenkeybridge.app/.CaptureService --es request_id {request.Id}");
+            string target = androidPackage;
+            string output = await RunAdb($"-s {serial} shell am start-foreground-service -n {target}/com.screenkeybridge.app.CaptureService --es request_id {request.Id}");
             if (output.Contains("Error:", StringComparison.OrdinalIgnoreCase) || output.Contains("Exception", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("phone could not start capture service");
             if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(30))) != request.Completion.Task)
                 throw new TimeoutException("phone did not confirm the save");

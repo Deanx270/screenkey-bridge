@@ -36,7 +36,7 @@ public final class CaptureService extends Service {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent intent = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("ScreenKey Bridge").setContentText(text).setContentIntent(intent)
+            .setContentTitle(getApplicationInfo().loadLabel(getPackageManager())).setContentText(text).setContentIntent(intent)
             .setOnlyAlertOnce(true).setOngoing(ongoing).setAutoCancel(!ongoing).build();
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {

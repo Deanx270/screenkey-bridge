@@ -67,7 +67,7 @@ public final class MainActivity extends Activity {
         layout.setPadding(pad, pad, pad, pad);
         layout.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
-        title.setText("ScreenKey Bridge"); title.setTextSize(26);
+        title.setText(getPackageName().endsWith(".preview") ? "ScreenKey Bridge Preview" : "ScreenKey Bridge"); title.setTextSize(26);
         layout.addView(title);
         TextView instructions = new TextView(this);
         instructions.setText("On Windows, select Pair connected phone from the tray menu, or enter the pairing key below. Keep ADB connected.");
@@ -101,7 +101,8 @@ public final class MainActivity extends Activity {
         addTile.setOnClickListener(v -> {
             if (Build.VERSION.SDK_INT >= 33) {
                 StatusBarManager bar = getSystemService(StatusBarManager.class);
-                bar.requestAddTileService(new ComponentName(this, CaptureTile.class), "Capture PC screen", Icon.createWithResource(this, R.drawable.ic_capture), getMainExecutor(),
+                String tileName = getPackageName().endsWith(".preview") ? "Capture PC (Preview)" : "Capture PC screen";
+                bar.requestAddTileService(new ComponentName(this, CaptureTile.class), tileName, Icon.createWithResource(this, R.drawable.ic_capture), getMainExecutor(),
                     result -> Toast.makeText(this, result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED || result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ? "Capture tile is available in Quick Settings." : "You can add Capture PC screen from Quick Settings edit.", Toast.LENGTH_LONG).show());
             } else Toast.makeText(this, "Open Quick Settings, tap Edit, and add Capture PC screen.", Toast.LENGTH_LONG).show();
         }); layout.addView(addTile);

@@ -45,3 +45,35 @@ captured.Reset();
 Press(0x79); // The capture shortcut also works while typing stays on the PC.
 if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Capture shortcut did not fire in PC mode.");
 Console.WriteLine("Keyboard routing regression checks passed.");
+
+Exception? setupError = null;
+var setupThread = new Thread(() => {
+    try
+    {
+        var setupType = type.Assembly.GetType("ScreenKeyBridge.ConnectionSetupForm", true)!;
+        var commands = new List<string>();
+        Func<string, Task<string>> adb = command => {
+            commands.Add(command);
+            if (command == "devices") return Task.FromResult("List of devices attached\nUSB123\tdevice\n");
+            if (command == "-s USB123 tcpip 5555") return Task.FromResult("restarting in TCP mode port: 5555");
+            if (command == "connect 192.168.1.10:5555") return Task.FromResult("connected to 192.168.1.10:5555");
+            throw new Exception("Unexpected command: " + command);
+        };
+        Func<Task> noAction = () => Task.CompletedTask;
+        using var form = (System.Windows.Forms.Form)Activator.CreateInstance(setupType, adb, noAction, noAction)!;
+        var endpoint = (System.Windows.Forms.TextBox)setupType.GetField("endpoint", flags)!.GetValue(form)!;
+        var connect = setupType.GetMethod("ConnectWifi", flags)!;
+        endpoint.Text = "not-an-address";
+        try { ((Task)connect.Invoke(form, null)!).GetAwaiter().GetResult(); throw new Exception("Invalid address was accepted."); }
+        catch (InvalidOperationException) { }
+        if (commands.Count != 0) throw new Exception("Invalid address invoked ADB.");
+        endpoint.Text = "192.168.1.10";
+        ((Task)connect.Invoke(form, null)!).GetAwaiter().GetResult();
+        ((Task)setupType.GetMethod("EnableTcp", flags)!.Invoke(form, null)!).GetAwaiter().GetResult();
+        if (!commands.SequenceEqual(new[] { "connect 192.168.1.10:5555", "devices", "-s USB123 tcpip 5555" })) throw new Exception("Unexpected setup commands.");
+        Console.WriteLine("Guided ADB setup validation passed.");
+    }
+    catch (Exception ex) { setupError = ex; }
+});
+setupThread.SetApartmentState(ApartmentState.STA); setupThread.Start(); setupThread.Join();
+if (setupError != null) throw new Exception("Connection setup test failed.", setupError);

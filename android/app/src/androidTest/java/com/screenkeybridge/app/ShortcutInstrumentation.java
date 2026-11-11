@@ -19,7 +19,8 @@ import java.util.List;
 /** Device-side checks that don't read or change the user's clipboard or text fields. */
 public final class ShortcutInstrumentation extends Instrumentation {
     private boolean checkClipboard;
-    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); checkClipboard = "true".equals(arguments.getString("check_clipboard")); start(); }
+    private boolean checkExternalImage;
+    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); checkClipboard = "true".equals(arguments.getString("check_clipboard")); checkExternalImage = "true".equals(arguments.getString("check_external_image")); start(); }
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
@@ -86,6 +87,16 @@ public final class ShortcutInstrumentation extends Instrumentation {
                 require(BridgeInputMethod.paste(context, connection, editor) && inserted[0] != null && uri.equals(inserted[0].getContentUri()) && (contentFlags[0] & InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION) != 0, "Image paste uses rich content and grants read access");
                 editor.contentMimeTypes = new String[]{"text/plain"}; action[0] = 0;
                 require(BridgeInputMethod.paste(context, connection, editor) && action[0] == android.R.id.paste, "Unsupported editors receive normal paste");
+            }
+            if (checkExternalImage) {
+                Context context = getTargetContext();
+                ClipData clip = ((ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE)).getPrimaryClip();
+                require(clip != null && clip.getItemCount() > 0 && clip.getDescription().hasMimeType("image/png"), "External capture is an image on the clipboard");
+                Uri uri = clip.getItemAt(0).getUri();
+                require(uri != null, "External capture has a content URI");
+                try (java.io.InputStream in = context.getContentResolver().openInputStream(uri)) {
+                    require(in != null && in.read() == 0x89 && in.read() == 0x50 && in.read() == 0x4e && in.read() == 0x47, "External capture grants clipboard read access");
+                }
             }
             result.putString("result", "Shortcut delivery checks passed");
             finish(Activity.RESULT_OK, result);

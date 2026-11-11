@@ -10,6 +10,7 @@ android {
         versionCode 2
         versionName '0.2.0'
         testInstrumentationRunner 'com.screenkeybridge.app.ShortcutInstrumentation'
+        manifestPlaceholders = [appLabel: 'ScreenKey Bridge', keyboardLabel: 'ScreenKey Bridge Keyboard', tileLabel: 'Capture PC screen']
     }
     def releaseStore = System.getenv('SCREENKEY_KEYSTORE')
     def releasePassword = System.getenv('SCREENKEY_SIGN_PASSWORD')
@@ -23,5 +24,14 @@ android {
             }
         }
         buildTypes { release { signingConfig signingConfigs.release } }
+    }
+    buildTypes {
+        preview {
+            initWith release
+            applicationIdSuffix '.preview'
+            versionNameSuffix '-preview'
+            matchingFallbacks = ['release']
+            manifestPlaceholders = [appLabel: 'ScreenKey Bridge Preview', keyboardLabel: 'ScreenKey Bridge Preview Keyboard', tileLabel: 'Capture PC (Preview)']
+        }
     }
 }

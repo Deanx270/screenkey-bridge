@@ -34,11 +34,12 @@ try {
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
     }
     $env:SCREENKEY_KEYSTORE = $keyStore
-    & $Gradle -p (Join-Path $repo 'android') assembleDebug assembleRelease --no-daemon
+    & $Gradle -p (Join-Path $repo 'android') assembleDebug assembleRelease assemblePreview --no-daemon
     if ($LASTEXITCODE -ne 0) { throw 'Android build failed.' }
     Copy-Item -LiteralPath (Join-Path $repo 'android/app/build/outputs/apk/debug/app-debug.apk') -Destination (Join-Path $repo 'dist/ScreenKeyBridge-Android-current-debug.apk') -Force
     Copy-Item -LiteralPath (Join-Path $repo 'android/app/build/outputs/apk/release/app-release.apk') -Destination (Join-Path $repo 'dist/ScreenKeyBridge-Android-release.apk') -Force
-    Write-Host 'Android APKs are in dist. The debug APK updates this machine debug install; the release APK uses the separate private release key.'
+    Copy-Item -LiteralPath (Join-Path $repo 'android/app/build/outputs/apk/preview/app-preview.apk') -Destination (Join-Path $repo 'dist/ScreenKeyBridge-Android-preview.apk') -Force
+    Write-Host 'Android APKs are in dist. The preview installs alongside the debug app and uses the release signing key.'
 } finally {
     $env:JAVA_HOME = $oldJava
     $env:PATH = $oldPath

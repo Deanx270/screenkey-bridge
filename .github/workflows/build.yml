@@ -25,4 +25,4 @@ jobs:
         with:
           gradle-version: '8.9'
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - run: gradle -p android assembleDebug assembleDebugAndroidTest
+      - run: gradle -p android assembleDebug assembleDebugAndroidTest assemblePreview

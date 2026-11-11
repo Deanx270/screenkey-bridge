@@ -3,20 +3,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:label="ScreenKey Bridge" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="true" android:allowBackup="false">
+    <application android:label="${appLabel}" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="true" android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <service android:name=".BridgeInputMethod" android:label="ScreenKey Bridge Keyboard" android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
+        <service android:name=".BridgeInputMethod" android:label="${keyboardLabel}" android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
             <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>
             <meta-data android:name="android.view.im" android:resource="@xml/input_method" />
         </service>
         <service android:name=".CaptureService" android:exported="true" android:permission="android.permission.DUMP" android:foregroundServiceType="dataSync" />
         <receiver android:name=".PairingReceiver" android:exported="true" android:permission="android.permission.DUMP" />
-        <service android:name=".CaptureTile" android:exported="true" android:label="Capture PC screen" android:icon="@drawable/ic_capture" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+        <service android:name=".CaptureTile" android:exported="true" android:label="${tileLabel}" android:icon="@drawable/ic_capture" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
         </service>
     </application>
