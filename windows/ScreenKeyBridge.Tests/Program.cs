@@ -5,6 +5,9 @@ using System.Runtime.InteropServices;
 // Exercise the real hook callback without installing another system-wide hook.
 if (args.Length != 1) throw new ArgumentException("Pass the path to ScreenKeyBridge.dll.");
 var type = Assembly.LoadFrom(Path.GetFullPath(args[0])).GetType("ScreenKeyBridge.KeyboardRouter", true)!;
+using (var stream = type.Assembly.GetManifestResourceStream("ScreenKeyBridge.screenkey.ico") ?? throw new Exception("Application icon is missing."))
+using (var icon = new System.Drawing.Icon(stream, 16, 16))
+    if (icon.Width != 16 || icon.Height != 16) throw new Exception("The tray icon has an unexpected size.");
 var router = RuntimeHelpers.GetUninitializedObject(type);
 const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
 void Set(string name, object value) => type.GetField(name, flags)!.SetValue(router, value);

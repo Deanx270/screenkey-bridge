@@ -26,6 +26,7 @@ internal sealed class BridgeContext : ApplicationContext
     private const int Port = 38473;
     private readonly string token;
     private readonly NotifyIcon tray;
+    private readonly Icon appIcon;
     private readonly HttpListener listener = new();
     private readonly CancellationTokenSource stop = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 5000 };
@@ -154,7 +155,9 @@ internal sealed class BridgeContext : ApplicationContext
         menu.Items.Add(captureMenu);
         menu.Items.Add("Return keyboard to PC (Ctrl+Alt+F12)", null, (_, _) => keyboard.Disconnect());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
-        tray = new NotifyIcon { Text = "ScreenKey Bridge", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
+        using (var iconStream = typeof(BridgeContext).Assembly.GetManifestResourceStream("ScreenKeyBridge.screenkey.ico") ?? throw new InvalidOperationException("Application icon is missing."))
+        using (var icon = new Icon(iconStream)) appIcon = (Icon)icon.Clone();
+        tray = new NotifyIcon { Text = "ScreenKey Bridge", Icon = appIcon, ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => ShowStatus();
         listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
         try { listener.Start(); _ = Serve(); }
@@ -506,7 +509,7 @@ internal sealed class BridgeContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        SystemEvents.SessionSwitch -= OnSessionSwitch; keyboard.Dispose(); timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); ui.Dispose(); stop.Dispose();
+        SystemEvents.SessionSwitch -= OnSessionSwitch; keyboard.Dispose(); timer.Stop(); timer.Dispose(); stop.Cancel(); listener.Close(); tray.Visible = false; tray.Dispose(); appIcon.Dispose(); ui.Dispose(); stop.Dispose();
         base.ExitThreadCore();
     }
 }
