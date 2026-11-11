@@ -2,6 +2,10 @@
 
 ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB connection. Capture the Windows virtual desktop to the phone's gallery and try the experimental PC-to-phone keyboard routing.
 
+## License
+
+ScreenKey Bridge is available under the [MIT License](LICENSE). Bundled third-party components are subject to their own licenses and notices.
+
 ## Requirements
 
 - Windows 10 or 11, signed in to the interactive desktop; .NET 8 Desktop Runtime to run a framework-dependent build.
