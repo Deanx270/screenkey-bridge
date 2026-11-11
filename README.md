@@ -8,16 +8,16 @@ ScreenKey Bridge is available under the [MIT License](LICENSE). Bundled third-pa
 
 ## Requirements
 
-- Windows 10 or 11, signed in to the interactive desktop; .NET 8 Desktop Runtime to run a framework-dependent build.
+- Windows 10 or 11, signed in to the interactive desktop; .NET 10 Desktop Runtime to run a framework-dependent build. The installer includes the runtime. Microsoft supports .NET 10 on Windows 11 and Windows 10 LTSC/Enterprise versions listed in its [Windows installation guidance](https://learn.microsoft.com/en-us/dotnet/core/install/windows).
 - Android 10 or later. ADB must already be authorized and connected, over USB or wireless.
 - Android SDK platform-tools (`adb`) on the Windows PATH, or the copy bundled with the Windows installer. Choose an authorized device if more than one is connected.
-- For development: .NET 8 SDK, JDK 17, Android SDK platform 35 and Gradle 8.9.
+- For development: .NET 10 SDK, JDK 17, Android SDK platform 35 and Gradle 8.9.
 
 ## Build and run
 
 1. Build the companion: `dotnet build windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release`.
 2. Build the Android debug app: from `android`, run `gradle assembleDebug`, then install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
-3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Select the normal or preview Android installation in the tray, then choose **Connect and pair a phone**. Select an authorized device and choose **Connect and pair selected phone**. The companion transfers its generated key automatically. Pairing the same Android installation with a different PC replaces its previous pairing.
+3. Start `windows/ScreenKeyBridge/bin/Release/net10.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Select the normal or preview Android installation in the tray, then choose **Connect and pair a phone**. Select an authorized device and choose **Connect and pair selected phone**. The companion transfers its generated key automatically. Pairing the same Android installation with a different PC replaces its previous pairing.
 4. In the phone app, choose **All displays** or a specific monitor, and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery and are also copied to the phone clipboard. Each capture replaces the previous clipboard contents. Use **Refresh displays** after connecting or disconnecting monitors. If a selected monitor is unavailable, capture reports an error rather than silently switching to another monitor.
 
 ## Capture without opening the app
@@ -60,7 +60,7 @@ The bridge supports US-layout letters, digits and punctuation, editing and navig
 
 ## Building installable packages
 
-`scripts/build-windows-installer.ps1` builds a per-user x64 Windows installer in `dist`. It needs the .NET 8 SDK, Inno Setup's `ISCC.exe`, and Android platform-tools (including `NOTICE.txt`). Pass `-Dotnet`, `-Iscc`, and `-PlatformTools` if they are not on PATH. The installer bundles ADB and uses an existing PATH installation when available. Exit any running companion from its tray menu before running the installer. If sign-in startup was enabled for a portable copy, disable it from that copy before moving to the installed one, then enable it from the installed copy if desired. The installer is not code-signed.
+`scripts/build-windows-installer.ps1` builds a per-user x64 Windows installer in `dist`. It needs the .NET 10 SDK, Inno Setup's `ISCC.exe`, and Android platform-tools (including `NOTICE.txt`). Pass `-Dotnet`, `-Iscc`, and `-PlatformTools` if they are not on PATH. The installer bundles ADB and uses an existing PATH installation when available. Exit any running companion from its tray menu before running the installer. If sign-in startup was enabled for a portable copy, disable it from that copy before moving to the installed one, then enable it from the installed copy if desired. The installer is not code-signed.
 
 `scripts/build-android-apks.ps1` builds three APKs in `dist`; set `JAVA_HOME` and `ANDROID_HOME`, and pass `-Gradle` if Gradle 8.9 is not on PATH. The debug APK can update an installation signed with this machine's debug key. The release APK uses a separate private release key, so Android cannot install it over the debug-signed app. The **preview** APK uses that same release key but a different package ID, so it can be installed alongside the existing debug app without deleting its settings. In the Windows tray select **Android app installation → Side-by-side preview**, then pair again; select **ScreenKey Bridge Preview Keyboard** in Android when testing its keyboard. Return the tray selection and Android keyboard to the normal app when finished. Only one PC should hold the ADB connection to a phone during testing, since both PCs would otherwise compete for the same reverse port.
 

@@ -11,7 +11,7 @@
 [Setup]
 AppId={{6D8E1F99-42C9-45D7-93F8-0D2BE4605F01}
 AppName=ScreenKey Bridge
-AppVersion=0.2.0
+AppVersion=0.3.0
 AppPublisher=Deanx270
 AppPublisherURL=https://github.com/Deanx270/screenkey-bridge
 SetupIconFile=..\windows\ScreenKeyBridge\screenkey.ico

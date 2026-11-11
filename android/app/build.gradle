@@ -7,8 +7,8 @@ android {
         applicationId 'com.screenkeybridge.app'
         minSdk 29
         targetSdk 35
-        versionCode 7
-        versionName '0.2.0'
+        versionCode 8
+        versionName '0.3.0'
         testInstrumentationRunner 'com.screenkeybridge.app.ShortcutInstrumentation'
         manifestPlaceholders = [appLabel: 'ScreenKey Bridge', keyboardLabel: 'ScreenKey Bridge Keyboard', tileLabel: 'Capture PC screen']
     }
