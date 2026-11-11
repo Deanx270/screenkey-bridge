@@ -12,9 +12,8 @@ namespace ScreenKeyBridge;
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static void Main()
     {
-        if (EdgeNativeHost.IsHostInvocation(args)) { EdgeNativeHost.Run().GetAwaiter().GetResult(); return; }
         using var instance = new Mutex(true, "ScreenKeyBridge.User." + Environment.UserName, out bool first);
         if (!first) return;
         ApplicationConfiguration.Initialize();
@@ -36,6 +35,7 @@ internal sealed class BridgeContext : ApplicationContext
     private string status = "Starting";
     private readonly KeyboardRouter keyboard = new();
     private readonly PageBridge pages = new();
+    private volatile string? browserToken;
     private readonly string shortcutPath;
     private readonly string captureShortcutPath;
     private readonly string displayPreferencePath;
@@ -88,12 +88,13 @@ internal sealed class BridgeContext : ApplicationContext
         string path = Path.Combine(dir, "pairing-key.txt");
         if (!File.Exists(path)) File.WriteAllText(path, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         token = File.ReadAllText(path).Trim();
+        try { browserToken = EdgeBrowserLink.Configure(); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { browserToken = null; }
         var menu = new ContextMenuStrip();
         menu.Items.Add(connectionItem);
         menu.Items.Add(captureItem);
         menu.Items.Add("Show status", null, (_, _) => ShowStatus());
         menu.Items.Add("Connect and pair a phone…", null, (_, _) => OpenSetup());
-        menu.Items.Add("Set up Edge page saving…", null, (_, _) => { try { EdgeNativeHost.Setup(); } catch (Exception ex) { MessageBox.Show(ex.Message, "ScreenKey Bridge"); } });
+        menu.Items.Add("Set up Edge page saving…", null, (_, _) => { try { browserToken = EdgeBrowserLink.Configure(); EdgeBrowserLink.Setup(); } catch (Exception ex) { MessageBox.Show(ex.Message, "ScreenKey Bridge"); } });
         var targetMenu = new ToolStripMenuItem("Android app installation");
         foreach (var target in new[] { (Name: "Normal app", Package: "com.screenkeybridge.app"), (Name: "Side-by-side preview", Package: "com.screenkeybridge.app.preview") })
         {
@@ -427,14 +428,27 @@ internal sealed class BridgeContext : ApplicationContext
     {
         try
         {
-            string given = context.Request.Headers["X-ScreenKey-Token"] ?? "";
-            byte[] actual = Encoding.UTF8.GetBytes(given), expected = Encoding.UTF8.GetBytes(token);
-            if (actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
-            if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
             string? route = context.Request.Url?.AbsolutePath;
+            bool extensionRoute = route is "/browser/poll" or "/browser/result";
+            string origin = context.Request.Headers["Origin"] ?? "";
+            if (extensionRoute && origin == EdgeBrowserLink.Origin) {
+                context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+                context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-ScreenKey-Extension";
+                context.Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+                context.Response.Headers["Access-Control-Allow-Private-Network"] = "true";
+                if (context.Request.HttpMethod == "OPTIONS") { context.Response.StatusCode = 204; return; }
+            }
+            if (extensionRoute && origin.Length != 0 && origin != EdgeBrowserLink.Origin) { context.Response.StatusCode = 403; return; }
+            string expectedToken = extensionRoute ? browserToken ?? "" : token;
+            string header = extensionRoute ? "X-ScreenKey-Extension" : "X-ScreenKey-Token";
+            string given = context.Request.Headers[header] ?? "";
+            byte[] actual = Encoding.UTF8.GetBytes(given), expected = Encoding.UTF8.GetBytes(expectedToken);
+            if (extensionRoute ? !EdgeBrowserLink.Authorized(expectedToken, given, origin) : expected.Length == 0 || actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
+            if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
             if (route == "/page/save")
             {
                 try {
+                    if (!EdgeBrowserLink.EdgeIsForeground()) throw new InvalidOperationException("Bring Microsoft Edge to the foreground on the PC.");
                     string json = await pages.Capture();
                     byte[] payload = Encoding.UTF8.GetBytes(json);
                     context.Response.ContentType = "application/json"; context.Response.ContentLength64 = payload.Length;

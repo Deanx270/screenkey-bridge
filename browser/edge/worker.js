@@ -1,27 +1,40 @@
-/* Requests arrive only from the local ScreenKey Bridge native host. */
-let port;
-let retry;
-function connect() {
-  if (port) return;
-  clearTimeout(retry);
-  try {
-    port = chrome.runtime.connectNative('com.screenkeybridge.page');
-    port.onMessage.addListener(async message => {
-      if (message.type !== 'capture') return;
-      try {
-        const win = await chrome.windows.getLastFocused({populate: true});
-        if (!win.focused) throw new Error('Bring Microsoft Edge to the foreground on the PC.');
-        const tab = win.tabs.find(t => t.active);
-        if (!tab || !/^https?:\/\//i.test(tab.url || '')) throw new Error('Open a normal web page in the active Edge tab.');
-        const [{result}] = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: snapshot});
-        if (!result || result.html.length > 8 * 1024 * 1024 || new TextEncoder().encode(JSON.stringify(result)).length > 12 * 1024 * 1024) throw new Error('The page is too large to save.');
-        port.postMessage({id: message.id, title: result.title, html: result.html});
-      } catch (e) { port.postMessage({id: message.id, error: String(e.message || e)}); }
-    });
-    port.onDisconnect.addListener(() => { port = null; retry = setTimeout(connect, 5000); });
-    port.postMessage({type: 'ready'});
-  } catch (_) { retry = setTimeout(connect, 5000); }
+/* This private credential is written by the companion, never sent to a page. */
+importScripts('bridge-config.js');
+const endpoint = 'http://127.0.0.1:38473/browser/';
+let polling = false;
+async function request(route, data) {
+  const response = await fetch(endpoint + route, {
+    method: 'POST', headers: {'X-ScreenKey-Extension': globalThis.SCREENKEY_EDGE_TOKEN, 'Content-Type': 'application/json'},
+    body: JSON.stringify(data || {}), signal: AbortSignal.timeout(5000)
+  });
+  if (!response.ok) throw new Error('Companion connection unavailable.');
+  return response;
 }
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    if (!/^[0-9A-F]{64}$/.test(globalThis.SCREENKEY_EDGE_TOKEN)) return;
+    const message = await (await request('poll')).json();
+    if (!message.id) return;
+    let reply;
+    try {
+      const win = await chrome.windows.getLastFocused({populate: true});
+      if (!win.focused) throw new Error('Bring Microsoft Edge to the foreground on the PC.');
+      const tab = win.tabs.find(t => t.active);
+      if (!tab || !/^https?:\/\//i.test(tab.url || '')) throw new Error('Open a normal web page in the active Edge tab.');
+      const [{result}] = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: snapshot});
+      if (!result || result.html.length > 8 * 1024 * 1024 || new TextEncoder().encode(JSON.stringify(result)).length > 12 * 1024 * 1024) throw new Error('The page is too large to save.');
+      reply = {id: message.id, title: result.title, html: result.html};
+    } catch (e) { reply = {id: message.id, error: String(e.message || e)}; }
+    await request('result', reply);
+  } catch (_) { /* The companion may be closed; retry without repeated browser errors. */ }
+  finally { polling = false; }
+}
+// Extension API calls keep this on-demand bridge responsive while Edge is open.
+setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 15000);
+setInterval(poll, 1000);
+poll();
 
 // Runs in the active page's isolated extension world, only on a phone request.
 async function snapshot() {
@@ -69,7 +82,3 @@ async function snapshot() {
   const charset = document.createElement('meta'); charset.charset = 'utf-8'; head.prepend(charset);
   return {title: document.title.slice(0, 200), html: '<!doctype html>\n' + root.outerHTML};
 }
-
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-connect();

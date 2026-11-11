@@ -1,33 +1,37 @@
 using System.Diagnostics;
-using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Win32;
+using System.Text.RegularExpressions;
 
 namespace ScreenKeyBridge;
 
-// One on-demand request at a time; page content lives only in memory on the PC.
+// One on-demand request at a time; captured pages remain in memory on the PC.
 internal sealed class PageBridge
 {
     private sealed record Request(string Id, TaskCompletionSource<string> Completion) { public bool Claimed; }
     private readonly object gate = new();
     private Request? pending;
+    private long lastPoll;
 
     public async Task<string> Capture()
     {
         var request = new Request(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), new(TaskCreationOptions.RunContinuationsAsynchronously));
-        lock (gate) { if (pending != null) throw new InvalidOperationException("Another page save is in progress."); pending = request; }
+        lock (gate) {
+            if (pending != null) throw new InvalidOperationException("Another page save is in progress.");
+            if (lastPoll == 0 || Environment.TickCount64 - lastPoll > 5000) throw new InvalidOperationException("Edge extension is not connected. Reload it in edge://extensions.");
+            pending = request;
+        }
         try {
-            if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(35))) != request.Completion.Task)
-                throw new TimeoutException("Edge extension did not respond. Check that it is installed and enabled.");
+            if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(15))) != request.Completion.Task)
+                throw new TimeoutException("Edge did not finish saving the page. Check the extension and try again.");
             return await request.Completion.Task;
         } finally { lock (gate) { if (ReferenceEquals(pending, request)) pending = null; } }
     }
     public string? Claim()
     {
-        lock (gate) { if (pending == null || pending.Claimed) return null; pending.Claimed = true; return pending.Id; }
+        lock (gate) { lastPoll = Environment.TickCount64; if (pending == null || pending.Claimed) return null; pending.Claimed = true; return pending.Id; }
     }
     public bool Complete(string json)
     {
@@ -44,83 +48,48 @@ internal sealed class PageBridge
     }
 }
 
-internal static class EdgeNativeHost
+internal static class EdgeBrowserLink
 {
     internal const string ExtensionId = "phjkoppbccocbjlonppkkpcbmmackdlj";
-    private const string HostName = "com.screenkeybridge.page";
-    internal static bool IsHostInvocation(string[] args) => args.Length > 0 && args[0] == $"chrome-extension://{ExtensionId}/";
-
-    public static void Setup()
+    internal const string Origin = "chrome-extension://" + ExtensionId;
+    public static bool Authorized(string? expected, string? provided, string? origin)
     {
-        string exe = Environment.ProcessPath ?? throw new InvalidOperationException("Could not locate the companion.");
-        if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Use the packaged Windows app to set up the Edge extension.");
-        string extension = Path.Combine(AppContext.BaseDirectory, "edge-extension");
-        if (!File.Exists(Path.Combine(extension, "manifest.json"))) throw new InvalidOperationException("Edge extension files are missing. Reinstall ScreenKey Bridge.");
-        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
-        Directory.CreateDirectory(dir);
-        string manifest = Path.Combine(dir, "edge-native-host.json");
-        File.WriteAllText(manifest, JsonSerializer.Serialize(new { name = HostName, description = "ScreenKey Bridge page saving", path = exe, type = "stdio", allowed_origins = new[] { $"chrome-extension://{ExtensionId}/" } }));
-        using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Edge\NativeMessagingHosts\" + HostName) ?? throw new IOException("Could not register the Edge host.");
-        key.SetValue("", manifest);
-        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{extension}\"") { UseShellExecute = true });
-        MessageBox.Show("In Edge, open edge://extensions, turn on Developer mode, select Load unpacked, and choose the folder just opened. Keep the extension enabled.\n\nIt needs access to web pages to save the page you request.", "Set up page saving");
+        if (!string.IsNullOrEmpty(origin) && origin != Origin) return false;
+        byte[] actual = Encoding.UTF8.GetBytes(provided ?? ""), wanted = Encoding.UTF8.GetBytes(expected ?? "");
+        return wanted.Length != 0 && actual.Length == wanted.Length && CryptographicOperations.FixedTimeEquals(actual, wanted);
     }
 
+    // This credential is separate from phone pairing. It never crosses ADB and
+    // is installed only in the user's local extension directory and profile.
+    public static string Configure()
+    {
+        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
+        Directory.CreateDirectory(dir);
+        string tokenPath = Path.Combine(dir, "edge-browser-token.txt");
+        string secret = File.Exists(tokenPath) ? File.ReadAllText(tokenPath).Trim() : "";
+        if (!Regex.IsMatch(secret, "^[0-9A-F]{64}$")) { secret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)); File.WriteAllText(tokenPath, secret); }
+        string extension = Path.Combine(AppContext.BaseDirectory, "edge-extension");
+        if (File.Exists(Path.Combine(extension, "manifest.json"))) {
+            string configPath = Path.Combine(extension, "bridge-config.js");
+            string content = "globalThis.SCREENKEY_EDGE_TOKEN = " + JsonSerializer.Serialize(secret) + ";\n";
+            if (!File.Exists(configPath) || File.ReadAllText(configPath) != content) File.WriteAllText(configPath, content);
+        }
+        return secret;
+    }
+    public static void Setup()
+    {
+        string extension = Path.Combine(AppContext.BaseDirectory, "edge-extension");
+        if (!File.Exists(Path.Combine(extension, "manifest.json"))) throw new InvalidOperationException("Edge extension files are missing. Reinstall ScreenKey Bridge.");
+        Configure();
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{extension}\"") { UseShellExecute = true });
+        MessageBox.Show("In Edge, open edge://extensions. If ScreenKey Bridge page saving is already installed, choose Reload. Otherwise turn on Developer mode, select Load unpacked, and choose the folder just opened.\n\nThe extension needs access to pages you request to save.", "Set up page saving");
+    }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-    private static bool EdgeIsForeground()
+    public static bool EdgeIsForeground()
     {
         GetWindowThreadProcessId(GetForegroundWindow(), out uint processId);
         try { using var process = Process.GetProcessById((int)processId); return process.ProcessName.Equals("msedge", StringComparison.OrdinalIgnoreCase); }
         catch (ArgumentException) { return false; }
-    }
-    private static async Task<string?> ReadMessage(Stream input)
-    {
-        byte[] header = new byte[4];
-        int first = await input.ReadAsync(header.AsMemory(0, 4));
-        if (first == 0) return null;
-        await input.ReadExactlyAsync(header.AsMemory(first));
-        int size = BitConverter.ToInt32(header);
-        if (size is <= 0 or > 16 * 1024 * 1024) throw new InvalidDataException("Native message size invalid.");
-        byte[] data = new byte[size]; await input.ReadExactlyAsync(data); return Encoding.UTF8.GetString(data);
-    }
-    private static async Task WriteMessage(Stream output, object value)
-    {
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value);
-        await output.WriteAsync(BitConverter.GetBytes(bytes.Length)); await output.WriteAsync(bytes); await output.FlushAsync();
-    }
-    public static async Task Run()
-    {
-        try {
-            using Stream input = Console.OpenStandardInput(), output = Console.OpenStandardOutput();
-            if (await ReadMessage(input) == null) return;
-            await WriteMessage(output, new { type = "ping" });
-            string tokenPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge", "pairing-key.txt");
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            client.DefaultRequestHeaders.Add("X-ScreenKey-Token", (await File.ReadAllTextAsync(tokenPath)).Trim());
-            int ticks = 0;
-            while (true) {
-                try {
-                    using var poll = await client.PostAsync("http://127.0.0.1:38473/browser/poll", null);
-                    if (poll.IsSuccessStatusCode) {
-                        using var doc = JsonDocument.Parse(await poll.Content.ReadAsStringAsync());
-                        if (doc.RootElement.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String) {
-                            string id = idElement.GetString()!;
-                            string result;
-                            if (!EdgeIsForeground()) result = JsonSerializer.Serialize(new { id, error = "Bring Microsoft Edge to the foreground on the PC." });
-                            else {
-                                await WriteMessage(output, new { type = "capture", id });
-                                result = await ReadMessage(input) ?? throw new EndOfStreamException();
-                            }
-                            using var data = new StringContent(result, Encoding.UTF8, "application/json");
-                            await client.PostAsync("http://127.0.0.1:38473/browser/result", data);
-                        }
-                    }
-                } catch (HttpRequestException) { }
-                catch (TaskCanceledException) { }
-                if (++ticks % 10 == 0) await WriteMessage(output, new { type = "ping" });
-                await Task.Delay(1000);
-            }
-        } catch (Exception) { /* Browser restarts the host after disconnect. Never write to stdout. */ }
     }
 }

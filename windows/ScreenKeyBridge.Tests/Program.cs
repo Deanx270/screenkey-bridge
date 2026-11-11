@@ -54,6 +54,10 @@ var pages = Activator.CreateInstance(pagesType)!;
 var capturePage = pagesType.GetMethod("Capture")!;
 var claimPage = pagesType.GetMethod("Claim")!;
 var completePage = pagesType.GetMethod("Complete")!;
+var unavailablePage = (Task<string>)capturePage.Invoke(pages, null)!;
+try { unavailablePage.GetAwaiter().GetResult(); throw new Exception("Disconnected extension was accepted."); }
+catch (InvalidOperationException ex) when (ex.Message.Contains("not connected")) { }
+if (claimPage.Invoke(pages, null) != null) throw new Exception("An unsolicited page request was created.");
 var pendingPage = (Task<string>)capturePage.Invoke(pages, null)!;
 string pageId = (string)claimPage.Invoke(pages, null)!;
 if (claimPage.Invoke(pages, null) != null) throw new Exception("A page request was claimed twice.");
@@ -66,6 +70,54 @@ completePage.Invoke(pages, new object[] { System.Text.Json.JsonSerializer.Serial
 try { failedPage.GetAwaiter().GetResult(); throw new Exception("Page error was not reported."); }
 catch (InvalidOperationException ex) when (ex.Message == "Edge unavailable") { }
 Console.WriteLine("Page request routing checks passed.");
+var edgeType = type.Assembly.GetType("ScreenKeyBridge.EdgeBrowserLink", true)!;
+var authorize = edgeType.GetMethod("Authorized")!;
+bool EdgeAuth(string? secret, string? supplied, string? origin) => (bool)authorize.Invoke(null, new object?[] { secret, supplied, origin })!;
+string sampleToken = new('A', 64);
+if (!EdgeAuth(sampleToken, sampleToken, "chrome-extension://phjkoppbccocbjlonppkkpcbmmackdlj") || EdgeAuth(sampleToken, new string('B', 64), "") || EdgeAuth(sampleToken, sampleToken, "https://example.com") || EdgeAuth("", "", "")) throw new Exception("Extension authentication did not enforce its separate credential and origin.");
+Console.WriteLine("Extension authentication checks passed.");
+
+// Exercise the actual loopback HTTP routes without starting the tray app or a browser.
+var bridgeType = type.Assembly.GetType("ScreenKeyBridge.BridgeContext", true)!;
+var bridge = RuntimeHelpers.GetUninitializedObject(bridgeType);
+bridgeType.GetField("token", flags)!.SetValue(bridge, new string('P', 64));
+bridgeType.GetField("browserToken", flags)!.SetValue(bridge, sampleToken);
+bridgeType.GetField("pages", flags)!.SetValue(bridge, pages);
+var routeHandler = bridgeType.GetMethod("Handle", flags)!;
+using var portReservation = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+portReservation.Start(); int portNumber = ((System.Net.IPEndPoint)portReservation.LocalEndpoint).Port; portReservation.Stop();
+using var testServer = new System.Net.HttpListener();
+testServer.Prefixes.Add($"http://127.0.0.1:{portNumber}/"); testServer.Start();
+using var httpClient = new System.Net.Http.HttpClient(new System.Net.Http.HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(5) };
+System.Net.Http.HttpResponseMessage Exchange(string route, string method, string? supplied, string? origin, string? body = null) {
+    using var request = new System.Net.Http.HttpRequestMessage(new System.Net.Http.HttpMethod(method), $"http://127.0.0.1:{portNumber}{route}");
+    if (supplied != null) request.Headers.TryAddWithoutValidation("X-ScreenKey-Extension", supplied);
+    if (origin != null) request.Headers.TryAddWithoutValidation("Origin", origin);
+    if (body != null) request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
+    var reply = httpClient.SendAsync(request);
+    var context = testServer.GetContextAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+    ((Task)routeHandler.Invoke(bridge, new object[] { context })!).GetAwaiter().GetResult();
+    return reply.GetAwaiter().GetResult();
+}
+const string extensionOrigin = "chrome-extension://phjkoppbccocbjlonppkkpcbmmackdlj";
+using (var response = Exchange("/browser/poll", "POST", "bad", extensionOrigin))
+    if (response.StatusCode != System.Net.HttpStatusCode.Unauthorized) throw new Exception("Invalid extension credential was accepted by HTTP.");
+using (var response = Exchange("/browser/poll", "POST", sampleToken, "https://example.com"))
+    if (response.StatusCode != System.Net.HttpStatusCode.Forbidden) throw new Exception("An untrusted origin was accepted by HTTP.");
+using (var response = Exchange("/browser/poll", "OPTIONS", null, extensionOrigin))
+    if (response.StatusCode != System.Net.HttpStatusCode.NoContent || !response.Headers.TryGetValues("Access-Control-Allow-Origin", out var allowedOrigins) || allowedOrigins.Single() != extensionOrigin) throw new Exception("Extension CORS preflight failed.");
+claimPage.Invoke(pages, null);
+var deliveredPage = (Task<string>)capturePage.Invoke(pages, null)!;
+string deliveredId;
+using (var response = Exchange("/browser/poll", "POST", sampleToken, extensionOrigin, "{}")) {
+    if (!response.IsSuccessStatusCode) throw new Exception("Authenticated extension poll failed.");
+    using var json = System.Text.Json.JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+    deliveredId = json.RootElement.GetProperty("id").GetString()!;
+}
+string deliveredJson = System.Text.Json.JsonSerializer.Serialize(new { id = deliveredId, title = "Example", html = "<p>Captured</p>" });
+using (var response = Exchange("/browser/result", "POST", sampleToken, extensionOrigin, deliveredJson))
+    if (!response.IsSuccessStatusCode || deliveredPage.GetAwaiter().GetResult() != deliveredJson) throw new Exception("Authenticated page result failed.");
+Console.WriteLine("Loopback extension HTTP checks passed.");
 
 Exception? setupError = null;
 var setupThread = new Thread(() => {
