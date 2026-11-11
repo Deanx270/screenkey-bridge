@@ -7,27 +7,51 @@ namespace ScreenKeyBridge;
 internal sealed class ConnectionSetupForm : Form
 {
     private readonly Func<string, Task<string>> adb;
-    private readonly Func<Task> refresh;
-    private readonly Func<Task> pair;
+    private readonly Func<string, Task<string>> pair;
+    private readonly ComboBox devices = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox endpoint = new() { Dock = DockStyle.Fill, PlaceholderText = "Phone IP address, e.g. 192.168.1.10:5555" };
     private readonly Label result = new() { AutoSize = true, MaximumSize = new Size(500, 0), Text = "Connect the phone with USB or enter its Wi-Fi address." };
     private readonly List<Button> actions = new();
 
-    public ConnectionSetupForm(Func<string, Task<string>> adb, Func<Task> refresh, Func<Task> pair)
+    public ConnectionSetupForm(Func<string, Task<string>> adb, Func<string, Task<string>> pair)
     {
-        this.adb = adb; this.refresh = refresh; this.pair = pair;
+        this.adb = adb; this.pair = pair;
         Text = "Connect a phone — ScreenKey Bridge"; StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 480); MinimumSize = new Size(480, 420);
+        ClientSize = new Size(560, 540); MinimumSize = new Size(480, 450);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, AutoScroll = true };
         layout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(500, 0), Text = "Install ScreenKey Bridge on the phone. Enable Developer options and USB debugging, then connect by USB and approve the phone's authorization prompt. USB can be used directly. If testing the side-by-side preview app, select it in the tray's Android app installation menu first." });
-        AddButton(layout, "Refresh connected devices", async () => { await refresh(); result.Text = "Check the ADB status in the tray, then choose Pair connected phone."; });
-        AddButton(layout, "Pair connected phone", async () => { await refresh(); await pair(); result.Text = "See the pairing result shown above."; });
+        layout.Controls.Add(new Label { AutoSize = true, Text = "Choose an authorized device:" });
+        layout.Controls.Add(devices);
+        AddButton(layout, "Refresh connected devices", RefreshDevices);
+        AddButton(layout, "Connect and pair selected phone", async () => {
+            if (devices.SelectedItem is not DeviceChoice choice) throw new InvalidOperationException("Select an authorized phone first, then try again.");
+            result.Text = await pair(choice.Serial);
+        });
         layout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(500, 0), Text = "Optional Wi-Fi setup: with exactly one authorized phone connected by USB, enable its ADB TCP mode. Find the phone's Wi-Fi IP address in Android settings, then unplug USB before connecting below." });
         AddButton(layout, "Enable Wi-Fi ADB on USB phone (port 5555)", EnableTcp);
         layout.Controls.Add(endpoint);
         AddButton(layout, "Connect to phone over Wi-Fi", ConnectWifi);
         layout.Controls.Add(result);
         Controls.Add(layout);
+        Shown += async (_, _) => { try { await RefreshDevices(); } catch (Exception ex) { result.Text = "Could not list devices: " + ex.Message; } };
+    }
+
+    private sealed record DeviceChoice(string Serial, string Description) { public override string ToString() => Description; }
+    private async Task RefreshDevices()
+    {
+        string? previous = (devices.SelectedItem as DeviceChoice)?.Serial;
+        var entries = BridgeContext.ParseDevices(await adb("devices -l"));
+        devices.Items.Clear();
+        foreach (var parts in entries.Where(parts => parts[1] == "device" && BridgeContext.IsSafeSerial(parts[0])))
+        {
+            string model = parts.FirstOrDefault(part => part.StartsWith("model:", StringComparison.Ordinal))?[6..].Replace('_', ' ') ?? "Android device";
+            devices.Items.Add(new DeviceChoice(parts[0], $"{model} — {parts[0]}"));
+        }
+        int selected = -1;
+        for (int i = 0; i < devices.Items.Count; i++) if (devices.Items[i] is DeviceChoice item && item.Serial == previous) selected = i;
+        if (selected < 0 && devices.Items.Count == 1) selected = 0;
+        devices.SelectedIndex = selected;
+        result.Text = devices.Items.Count == 0 ? "No authorized devices found. Approve USB debugging on the phone and refresh." : "Select a phone and choose Connect and pair. Pairing replaces that app's pairing with another PC.";
     }
 
     private void AddButton(Control parent, string text, Func<Task> action)
@@ -61,7 +85,7 @@ internal sealed class ConnectionSetupForm : Form
             throw new InvalidOperationException("Enter an IPv4 address with an optional port, such as 192.168.1.10:5555.");
         string output = await adb($"connect {address}");
         if (!output.Contains("connected to", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("ADB could not connect. Check the IP, Wi-Fi, and debugging authorization.");
-        await refresh();
-        result.Text = "ADB connected. Approve any prompt on the phone, then select Pair connected phone. If two devices are listed, unplug USB and refresh.";
+        await RefreshDevices();
+        result.Text = "ADB connected. Approve any phone prompt, refresh the list, then select and pair the phone.";
     }
 }

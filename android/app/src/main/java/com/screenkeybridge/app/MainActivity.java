@@ -70,7 +70,7 @@ public final class MainActivity extends Activity {
         title.setText(getPackageName().endsWith(".preview") ? "ScreenKey Bridge Preview" : "ScreenKey Bridge"); title.setTextSize(26);
         layout.addView(title);
         TextView instructions = new TextView(this);
-        instructions.setText("On Windows, select Pair connected phone from the tray menu, or enter the pairing key below. Keep ADB connected.");
+        instructions.setText("On Windows, select Connect and pair a phone from the tray menu, then choose this phone. Keep ADB connected. The key is transferred automatically.");
         layout.addView(instructions);
         key = new EditText(this);
         key.setSingleLine(true); key.setHint("Windows pairing key");
@@ -122,7 +122,7 @@ public final class MainActivity extends Activity {
         Button toggle = new Button(this); toggle.setText("Toggle PC / phone keyboard");
         toggle.setOnClickListener(v -> {
             String secret = key.getText().toString().trim();
-            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the Windows pairing key first."); return; }
+            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Connect and pair this phone from the Windows tray menu first."); return; }
             getPreferences(MODE_PRIVATE).edit().putString("key", secret).apply();
             worker.execute(() -> { try { String s = BridgeInputMethod.request(this, "toggle").getString("state"); runOnUiThread(() -> keyboardStatus.setText(modeLabel(s))); }
                 catch (Exception e) { runOnUiThread(() -> keyboardStatus.setText(connectionError(e))); } });
@@ -130,7 +130,7 @@ public final class MainActivity extends Activity {
         keyboardStatus = new TextView(this); keyboardStatus.setText("Keyboard: checking"); layout.addView(keyboardStatus);
         capture.setOnClickListener(v -> {
             String secret = key.getText().toString().trim();
-            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Enter the 64-character pairing key from Windows."); return; }
+            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Connect and pair this phone from the Windows tray menu first."); return; }
             getPreferences(MODE_PRIVATE).edit().putString("key", secret).apply();
             DisplayChoice selected = (DisplayChoice)displayPicker.getSelectedItem();
             String display = selected == null ? "" : selected.id;

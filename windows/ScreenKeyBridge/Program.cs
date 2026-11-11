@@ -38,6 +38,7 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly string displayPreferencePath;
     private readonly string androidTargetPath;
     private readonly string devicePath;
+    private readonly string selectedDevicePath;
     private readonly string startupCommand;
     private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
     private readonly ToolStripMenuItem startupItem = new("Start at Windows sign-in");
@@ -47,6 +48,7 @@ internal sealed class BridgeContext : ApplicationContext
     private int captureShortcut = 10;
     private string captureStatus = "none";
     private volatile string? connectedSerial;
+    private volatile string? preferredSerial;
     private volatile bool reconnectPaused;
     private volatile string androidPackage = "com.screenkeybridge.app";
     private readonly object captureGate = new();
@@ -60,6 +62,8 @@ internal sealed class BridgeContext : ApplicationContext
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenKeyBridge");
         Directory.CreateDirectory(dir);
         devicePath = Path.Combine(dir, "last-wireless-device.txt");
+        selectedDevicePath = Path.Combine(dir, "selected-device.txt");
+        if (File.Exists(selectedDevicePath)) { string savedDevice = File.ReadAllText(selectedDevicePath).Trim(); if (IsSafeSerial(savedDevice)) preferredSerial = savedDevice; }
         androidTargetPath = Path.Combine(dir, "android-target.txt");
         if (File.Exists(androidTargetPath) && File.ReadAllText(androidTargetPath).Trim() == "com.screenkeybridge.app.preview") androidPackage = "com.screenkeybridge.app.preview";
         startupCommand = GetStartupCommand();
@@ -80,9 +84,8 @@ internal sealed class BridgeContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add(connectionItem);
         menu.Items.Add(captureItem);
-        menu.Items.Add("Show pairing key and status", null, (_, _) => ShowStatus());
-        menu.Items.Add("Connect a phone…", null, (_, _) => { using var form = new ConnectionSetupForm(RunAdb, ResumeConnection, PairPhone); form.ShowDialog(); });
-        menu.Items.Add("Pair connected phone", null, async (_, _) => await PairPhone());
+        menu.Items.Add("Show status", null, (_, _) => ShowStatus());
+        menu.Items.Add("Connect and pair a phone…", null, (_, _) => OpenSetup());
         var targetMenu = new ToolStripMenuItem("Android app installation");
         foreach (var target in new[] { (Name: "Normal app", Package: "com.screenkeybridge.app"), (Name: "Side-by-side preview", Package: "com.screenkeybridge.app.preview") })
         {
@@ -149,7 +152,8 @@ internal sealed class BridgeContext : ApplicationContext
         _ = ConnectAdb();
     }
 
-    private void ShowStatus() => MessageBox.Show($"{status}\nAndroid app: {(androidPackage.EndsWith(".preview", StringComparison.Ordinal) ? "side-by-side preview" : "normal")}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nEnter this pairing key in the phone app:\n\n{token}\n\nKeep this key private. The key is stored in your Windows user profile.", "ScreenKey Bridge");
+    private void ShowStatus() => MessageBox.Show($"{status}\nAndroid app: {(androidPackage.EndsWith(".preview", StringComparison.Ordinal) ? "side-by-side preview" : "normal")}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nTo connect or switch phones, choose Connect and pair a phone in the tray menu.", "ScreenKey Bridge");
+    private void OpenSetup() { using var form = new ConnectionSetupForm(RunAdb, PairPhone); form.ShowDialog(); }
     private void SetCaptureStatus(string value)
     {
         captureStatus = value;
@@ -159,19 +163,29 @@ internal sealed class BridgeContext : ApplicationContext
     }
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) keyboard.Disconnect(); }
 
-    private async Task PairPhone()
+    private async Task<string> PairPhone(string serial)
     {
+        if (!IsSafeSerial(serial)) throw new InvalidOperationException("Invalid device identifier. Refresh the device list.");
+        if (Volatile.Read(ref disconnecting) != 0) throw new InvalidOperationException("Wait for disconnection to finish.");
+        string? previous = preferredSerial;
         try
         {
             var serials = ParseDevices(await RunAdb("devices")).Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
-            if (serials.Length != 1) { MessageBox.Show("Connect and authorize exactly one phone in ADB first.", "ScreenKey Bridge"); return; }
-            string serial = serials[0];
+            if (!serials.Contains(serial, StringComparer.Ordinal)) throw new InvalidOperationException("The selected device is no longer authorized or connected. Refresh the list.");
+            preferredSerial = serial; connectedSerial = null; keyboard.Disconnect(); reconnectPaused = false;
+            for (int i = 0; i < 60 && Volatile.Read(ref checking) != 0; i++) await Task.Delay(200);
+            if (Volatile.Read(ref checking) != 0) throw new TimeoutException("ADB is busy. Try again.");
+            await ConnectAdb();
+            if (connectedSerial != serial) throw new InvalidOperationException("Could not establish the phone connection. Check the tray status.");
             string target = androidPackage;
             string result = await RunAdb($"-s {serial} shell am broadcast --include-stopped-packages -a com.screenkeybridge.action.PAIR -n {target}/com.screenkeybridge.app.PairingReceiver --es key {token}");
             if (!result.Contains("result=1", StringComparison.Ordinal)) throw new InvalidOperationException("The phone app did not confirm pairing. Install or update it and try again.");
-            MessageBox.Show($"Phone paired with the {(target.EndsWith(".preview", StringComparison.Ordinal) ? "preview" : "normal")} app. Select its keyboard on the phone to use keyboard routing.", "ScreenKey Bridge");
+            string message = $"Connected and paired {serial} with the {(target.EndsWith(".preview", StringComparison.Ordinal) ? "preview" : "normal")} app. Select its keyboard on the phone to use keyboard routing.";
+            try { await File.WriteAllTextAsync(selectedDevicePath, serial); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { message += " The device selection could not be saved for next time."; }
+            return message;
         }
-        catch (Exception) { MessageBox.Show("Could not pair the phone. Check its ADB connection and that the current ScreenKey Bridge app is installed.", "ScreenKey Bridge"); }
+        catch { preferredSerial = previous; connectedSerial = null; keyboard.Disconnect(); SetConnectionStatus("Pairing failed; reconnect or choose a device."); throw; }
     }
     private Task ResumeConnection()
     {
@@ -188,8 +202,9 @@ internal sealed class BridgeContext : ApplicationContext
             if (Volatile.Read(ref checking) != 0) throw new TimeoutException("wait for ADB checking to finish and try again");
             var wireless = ParseDevices(await RunAdb("devices"))
                 .Where(parts => IsWirelessEndpoint(parts[0])).Select(parts => parts[0]).ToArray();
-            if (wireless.Length > 1) { SetConnectionStatus("Reconnect paused; multiple wireless devices found."); return; }
-            if (wireless.Length == 1) await RunAdb($"disconnect {wireless[0]}");
+            string? selected = preferredSerial != null ? (wireless.Contains(preferredSerial, StringComparer.Ordinal) ? preferredSerial : null) : wireless.Length == 1 ? wireless[0] : null;
+            if (selected == null && wireless.Length > 1) { SetConnectionStatus("Reconnect paused; select a wireless phone first."); return; }
+            if (selected != null) await RunAdb($"disconnect {selected}");
             SetConnectionStatus("Wireless connection paused. Use Reconnect ADB to resume.");
         }
         catch (Exception ex) { SetConnectionStatus("Disconnect failed: " + ex.Message); }
@@ -253,6 +268,8 @@ internal sealed class BridgeContext : ApplicationContext
         return colon > 0 && IPAddress.TryParse(value[..colon], out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
             && int.TryParse(value[(colon + 1)..], out int port) && port is >= 1 and <= 65535;
     }
+    internal static bool IsSafeSerial(string value) => System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z0-9._:-]+$");
+    internal static string? ChooseSerial(string[] serials, string? preferred) => preferred == null ? (serials.Length == 1 ? serials[0] : null) : serials.Contains(preferred, StringComparer.Ordinal) ? preferred : null;
 
     private async Task ConnectAdb()
     {
@@ -277,21 +294,23 @@ internal sealed class BridgeContext : ApplicationContext
                     serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
                 }
             }
-            if (serials.Length != 1)
+            string? serial = ChooseSerial(serials, preferredSerial);
+            if (serial == null)
             {
-                string errorMessage = serials.Length > 1 ? "Multiple devices: connect only one." : entries.Any(parts => parts[1] == "unauthorized") ? "Phone unauthorized: approve USB debugging on phone." : entries.Any(parts => parts[1] == "offline") ? "Phone offline: check ADB and Wi-Fi." : "No ADB device: reconnect the phone.";
+                string errorMessage = preferredSerial != null ? "Selected phone unavailable: reconnect it or select another." : serials.Length > 1 ? "Multiple devices: choose a phone in Connect and pair." : entries.Any(parts => parts[1] == "unauthorized") ? "Phone unauthorized: approve USB debugging on phone." : entries.Any(parts => parts[1] == "offline") ? "Phone offline: check ADB and Wi-Fi." : "No ADB device: reconnect the phone.";
                 connectedSerial = null; SetConnectionStatus(errorMessage); keyboard.Disconnect(); return;
             }
-            await RunAdb($"-s {serials[0]} reverse tcp:{Port} tcp:{Port}");
-            if (reconnectPaused) return;
-            connectedSerial = serials[0];
-            string message = $"Connected to {serials[0]}";
-            if (IsWirelessEndpoint(serials[0]))
+            if (!IsSafeSerial(serial)) throw new InvalidOperationException("Invalid ADB device identifier.");
+            await RunAdb($"-s {serial} reverse tcp:{Port} tcp:{Port}");
+            if (reconnectPaused || ChooseSerial(serials, preferredSerial) != serial) return;
+            connectedSerial = serial;
+            string message = $"Connected to {serial}";
+            if (IsWirelessEndpoint(serial))
             {
                 try
                 {
-                    if (!File.Exists(devicePath) || (await File.ReadAllTextAsync(devicePath)).Trim() != serials[0])
-                        await File.WriteAllTextAsync(devicePath, serials[0]);
+                    if (!File.Exists(devicePath) || (await File.ReadAllTextAsync(devicePath)).Trim() != serial)
+                        await File.WriteAllTextAsync(devicePath, serial);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { message += " (could not save for reconnect)"; }
             }
@@ -301,7 +320,7 @@ internal sealed class BridgeContext : ApplicationContext
         finally { Interlocked.Exchange(ref checking, 0); }
     }
 
-    private static string[][] ParseDevices(string output) => output.Split('\n')
+    internal static string[][] ParseDevices(string output) => output.Split('\n')
         .Select(line => line.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
         .Where(parts => parts.Length >= 2 && parts[0] != "List" && parts[1] is "device" or "offline" or "unauthorized")
         .ToArray();

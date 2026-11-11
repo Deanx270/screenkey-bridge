@@ -6,14 +6,14 @@ ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB 
 
 - Windows 10 or 11, signed in to the interactive desktop; .NET 8 Desktop Runtime to run a framework-dependent build.
 - Android 10 or later. ADB must already be authorized and connected, over USB or wireless.
-- Android SDK platform-tools (`adb`) on the Windows PATH, or the copy bundled with the Windows installer. Exactly one authorized ADB device should be connected.
+- Android SDK platform-tools (`adb`) on the Windows PATH, or the copy bundled with the Windows installer. Choose an authorized device if more than one is connected.
 - For development: .NET 8 SDK, JDK 17, Android SDK platform 35 and Gradle 8.9.
 
 ## Build and run
 
 1. Build the companion: `dotnet build windows/ScreenKeyBridge/ScreenKeyBridge.csproj -c Release`.
 2. Build the Android debug app: from `android`, run `gradle assembleDebug`, then install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
-3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Right-click its icon and select **Connect a phone** for guided USB or Wi-Fi setup, then **Pair connected phone**. Pairing requires one authorized ADB device with the Android app installed. Alternatively, select **Show pairing key and status** and enter the key manually.
+3. Start `windows/ScreenKeyBridge/bin/Release/net8.0-windows/ScreenKeyBridge.exe` in your signed-in Windows session. It runs in the notification area. Select the normal or preview Android installation in the tray, then choose **Connect and pair a phone**. Select an authorized device and choose **Connect and pair selected phone**. The companion transfers its generated key automatically. Pairing the same Android installation with a different PC replaces its previous pairing.
 4. In the phone app, choose **All displays** or a specific monitor, and tap **Capture PC screen**. Images appear in `Pictures/ScreenKey Bridge` in the phone's gallery and are also copied to the phone clipboard. Each capture replaces the previous clipboard contents. Use **Refresh displays** after connecting or disconnecting monitors. If a selected monitor is unavailable, capture reports an error rather than silently switching to another monitor.
 
 ## Capture without opening the app
@@ -25,7 +25,7 @@ ScreenKey Bridge connects an Android phone to a Windows PC over an existing ADB 
 
 The Windows shortcut captures the selected screen into memory before asking the phone to fetch and save it; no desktop screenshot file is created. One shortcut capture can be in flight at a time, and an unconfirmed image is discarded after 30 seconds. PC capture status is available in the tray rather than a desktop popup.
 
-The companion periodically checks ADB and sets up `adb reverse tcp:38473 tcp:38473`. Right-click its tray icon to see connection status or select **Reconnect ADB** to retry immediately. **Connect a phone** can enable TCP port 5555 on an authorized USB-connected phone and connect to an IPv4 address entered by the user. The phone must have USB debugging enabled and the user must approve the device's authorization prompt. After one successful connection using an IPv4 `adb tcpip` address, the companion saves that address locally and attempts `adb connect` to it when no device is connected. It then recreates the reverse mapping. The phone and its ADB authorization must still be available, and an IP-address change, disabled wireless debugging, or a changed port may require reconnecting. The guided Wi-Fi path uses TCP mode and does not pair Android's separate wireless-debugging pairing-code flow. If there are multiple devices, disconnect the others for now.
+The companion periodically checks ADB and sets up `adb reverse tcp:38473 tcp:38473`. Right-click its tray icon to see connection status or select **Reconnect ADB** to retry immediately. **Connect and pair a phone** can enable TCP port 5555 on an authorized USB-connected phone and connect to an IPv4 address entered by the user. The phone must have USB debugging enabled and the user must approve the device's authorization prompt. After one successful connection using an IPv4 `adb tcpip` address, the companion saves that address locally and attempts `adb connect` to it when no device is connected. It then recreates the reverse mapping. The phone and its ADB authorization must still be available, and an IP-address change, disabled wireless debugging, or a changed port may require reconnecting. The guided Wi-Fi path uses TCP mode and does not pair Android's separate wireless-debugging pairing-code flow. If multiple devices are connected, choose one in the setup window. The companion remembers that selection and does not silently switch devices if it becomes unavailable.
 
 To start the companion when you sign in, right-click its tray icon and check **Start at Windows sign-in**. This is off by default and can be unchecked in the same menu. The per-user startup entry points to the executable's current location; if you move it, remove the old entry in Windows Startup settings and enable the option again from its new location.
 
@@ -35,7 +35,7 @@ The server binds only to Windows loopback and requires a random pairing key. The
 
 ## Experimental keyboard routing
 
-1. In the Android app, save your pairing key by capturing a screen or pressing the keyboard toggle. Tap **Enable ScreenKey keyboard**, enable it in Android settings, and then use **Choose ScreenKey keyboard** to select it. Android displays a standard warning when enabling a keyboard; input methods can receive text you type through them.
+1. After pairing from Windows, open the Android app. Tap **Enable ScreenKey keyboard**, enable it in Android settings, and then use **Choose ScreenKey keyboard** to select it. Android displays a standard warning when enabling a keyboard; input methods can receive text you type through them.
 2. Open a text field in the target phone app. Press **Ctrl+Alt+F11** on Windows or use the toggle shown on the ScreenKey keyboard. Alternatively, use the Android app's toggle and open a text field within 30 seconds.
 3. Press **Ctrl+Alt+F12** to return to PC typing. Ctrl+Alt+F11 also toggles the mode. The function key used with Ctrl+Alt can be changed from the Windows tray menu; F12 is reserved for emergency return.
 4. Use **Choose another keyboard** on the ScreenKey keyboard to return to your normal Android keyboard.
@@ -50,7 +50,7 @@ The bridge supports US-layout letters, digits and punctuation, editing and navig
 
 `scripts/build-android-apks.ps1` builds three APKs in `dist`; set `JAVA_HOME` and `ANDROID_HOME`, and pass `-Gradle` if Gradle 8.9 is not on PATH. The debug APK can update an installation signed with this machine's debug key. The release APK uses a separate private release key, so Android cannot install it over the debug-signed app. The **preview** APK uses that same release key but a different package ID, so it can be installed alongside the existing debug app without deleting its settings. In the Windows tray select **Android app installation → Side-by-side preview**, then pair again; select **ScreenKey Bridge Preview Keyboard** in Android when testing its keyboard. Return the tray selection and Android keyboard to the normal app when finished. Only one PC should hold the ADB connection to a phone during testing, since both PCs would otherwise compete for the same reverse port.
 
-To move a wireless phone between PCs, select **Disconnect wireless phone** in the first PC's tray menu, then exit its companion before connecting from the other PC. The menu pauses automatic reconnect for that running companion; use **Reconnect ADB** to resume it. This disconnects only when exactly one wireless ADB device is present, leaving other devices alone. Reopening the first companion resumes its saved reconnect behavior, so exit and disconnect the other PC before switching back.
+To move a wireless phone between PCs, select **Disconnect wireless phone** in the first PC's tray menu, then exit its companion before connecting from the other PC. The menu pauses automatic reconnect for that running companion; use **Reconnect ADB** to resume it. This disconnects the selected wireless phone, or the only wireless phone if no selection was made. Reopening the first companion resumes its saved reconnect behavior, so exit and disconnect the other PC before switching back.
 
 The side-by-side preview is for testing: because its package ID differs, it cannot be upgraded in place to the normal release APK. The normal release and debug APKs still cannot update one another because their signatures differ. Do not uninstall an existing app just to change signing keys without first considering its local settings; gallery images are separate from those settings.
 
@@ -64,6 +64,6 @@ $secret = Get-Content "$env:LOCALAPPDATA\ScreenKeyBridge\signing\release-passwor
 ## Current limitations
 
 - Keyboard routing is experimental and shortcut behavior varies across Android apps.
-- Pairing key rotation and selecting among multiple ADB devices are not yet exposed in the UI. To reset pairing, exit the companion, delete `%LOCALAPPDATA%\ScreenKeyBridge\pairing-key.txt`, and restart it; enter the new key on the phone.
+- Pairing key rotation is not yet exposed in the UI. To reset pairing, exit the companion, delete `%LOCALAPPDATA%\ScreenKeyBridge\pairing-key.txt`, restart it, and pair the selected phone again.
 - Wireless ADB connections depend on the device and network remaining connected. Reconnect ADB if necessary; the companion retries the reverse mapping.
 - This is an early development build, not a security boundary against malicious software running as the same Windows or Android user.
