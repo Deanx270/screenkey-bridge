@@ -28,7 +28,7 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly NotifyIcon tray;
     private readonly HttpListener listener = new();
     private readonly CancellationTokenSource stop = new();
-    private readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 5000 };
     private int checking;
     private int disconnecting;
     private string status = "Starting";
@@ -39,6 +39,7 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly string androidTargetPath;
     private readonly string devicePath;
     private readonly string selectedDevicePath;
+    private readonly string autoReconnectPath;
     private readonly string startupCommand;
     private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
     private readonly ToolStripMenuItem startupItem = new("Start at Windows sign-in");
@@ -50,6 +51,7 @@ internal sealed class BridgeContext : ApplicationContext
     private volatile string? connectedSerial;
     private volatile string? preferredSerial;
     private volatile bool reconnectPaused;
+    private volatile bool autoReconnect;
     private volatile string androidPackage = "com.screenkeybridge.app";
     private readonly object captureGate = new();
     private string selectedDisplay = "";
@@ -63,6 +65,8 @@ internal sealed class BridgeContext : ApplicationContext
         Directory.CreateDirectory(dir);
         devicePath = Path.Combine(dir, "last-wireless-device.txt");
         selectedDevicePath = Path.Combine(dir, "selected-device.txt");
+        autoReconnectPath = Path.Combine(dir, "auto-reconnect.txt");
+        autoReconnect = File.Exists(autoReconnectPath) && File.ReadAllText(autoReconnectPath).Trim() == "on";
         if (File.Exists(selectedDevicePath)) { string savedDevice = File.ReadAllText(selectedDevicePath).Trim(); if (IsSafeSerial(savedDevice)) preferredSerial = savedDevice; }
         androidTargetPath = Path.Combine(dir, "android-target.txt");
         if (File.Exists(androidTargetPath) && File.ReadAllText(androidTargetPath).Trim() == "com.screenkeybridge.app.preview") androidPackage = "com.screenkeybridge.app.preview";
@@ -102,10 +106,19 @@ internal sealed class BridgeContext : ApplicationContext
         menu.Items.Add(targetMenu);
         menu.Items.Add("Reconnect ADB", null, async (_, _) => await ResumeConnection());
         menu.Items.Add("Disconnect wireless phone", null, async (_, _) => await DisconnectWireless());
+        var autoReconnectItem = new ToolStripMenuItem("Automatically reconnect wireless ADB") { Checked = autoReconnect };
+        autoReconnectItem.Click += (_, _) => {
+            try {
+                bool enabled = !autoReconnect;
+                File.WriteAllText(autoReconnectPath, enabled ? "on" : "off");
+                autoReconnect = enabled; autoReconnectItem.Checked = enabled;
+            } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { MessageBox.Show($"Could not save reconnect setting: {ex.Message}", "ScreenKey Bridge"); }
+        };
+        menu.Items.Add(autoReconnectItem);
         menu.Items.Add("Capture screen to phone", null, (_, _) => _ = Task.Run(CaptureForPhone));
         startupItem.Click += (_, _) => ToggleStartup();
         menu.Items.Add(startupItem);
-        menu.Opening += (_, _) => RefreshStartup();
+        menu.Opening += async (_, _) => { RefreshStartup(); await ConnectAdb(); };
         menu.Items.Add("Toggle keyboard routing", null, (_, _) => keyboard.Toggle());
         var shortcutMenu = new ToolStripMenuItem("Keyboard shortcut (Ctrl+Alt)");
         for (int i = 1; i <= 11; i++)
@@ -187,10 +200,13 @@ internal sealed class BridgeContext : ApplicationContext
         }
         catch { preferredSerial = previous; connectedSerial = null; keyboard.Disconnect(); SetConnectionStatus("Pairing failed; reconnect or choose a device."); throw; }
     }
-    private Task ResumeConnection()
+    private async Task ResumeConnection()
     {
-        if (Volatile.Read(ref disconnecting) != 0) { SetConnectionStatus("Wait for disconnection to finish."); return Task.CompletedTask; }
-        reconnectPaused = false; return ConnectAdb();
+        if (Volatile.Read(ref disconnecting) != 0) { SetConnectionStatus("Wait for disconnection to finish."); return; }
+        reconnectPaused = false;
+        for (int i = 0; i < 60 && Volatile.Read(ref checking) != 0; i++) await Task.Delay(200);
+        if (Volatile.Read(ref checking) != 0) { SetConnectionStatus("ADB is busy; try reconnecting again."); return; }
+        await ConnectAdb(true);
     }
     private async Task DisconnectWireless()
     {
@@ -270,8 +286,9 @@ internal sealed class BridgeContext : ApplicationContext
     }
     internal static bool IsSafeSerial(string value) => System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z0-9._:-]+$");
     internal static string? ChooseSerial(string[] serials, string? preferred) => preferred == null ? (serials.Length == 1 ? serials[0] : null) : serials.Contains(preferred, StringComparer.Ordinal) ? preferred : null;
+    internal static bool ShouldReconnect(bool automatic, bool requested, int authorizedCount, bool unauthorized) => (automatic || requested) && authorizedCount == 0 && !unauthorized;
 
-    private async Task ConnectAdb()
+    private async Task ConnectAdb(bool reconnectRequested = false)
     {
         if (reconnectPaused) return;
         if (Interlocked.Exchange(ref checking, 1) != 0) return;
@@ -282,7 +299,7 @@ internal sealed class BridgeContext : ApplicationContext
             if (reconnectPaused) return;
             var entries = ParseDevices(devices);
             var serials = entries.Where(parts => parts[1] == "device").Select(parts => parts[0]).ToArray();
-            if (serials.Length == 0 && !entries.Any(parts => parts[1] == "unauthorized") && File.Exists(devicePath))
+            if (ShouldReconnect(autoReconnect, reconnectRequested, serials.Length, entries.Any(parts => parts[1] == "unauthorized")) && File.Exists(devicePath))
             {
                 string saved = (await File.ReadAllTextAsync(devicePath)).Trim();
                 if (IsWirelessEndpoint(saved))

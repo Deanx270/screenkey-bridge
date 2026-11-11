@@ -83,6 +83,9 @@ var setupThread = new Thread(() => {
         var choose = bridge.GetMethod("ChooseSerial", BindingFlags.NonPublic | BindingFlags.Static)!;
         string? Choose(string[] serials, string? selected) => (string?)choose.Invoke(null, new object?[] { serials, selected });
         if (Choose(new[] { "USB123" }, null) != "USB123" || Choose(new[] { "USB123", "192.168.1.10:5555" }, null) != null || Choose(new[] { "USB123", "192.168.1.10:5555" }, "192.168.1.10:5555") != "192.168.1.10:5555" || Choose(new[] { "USB123" }, "other") != null) throw new Exception("Device selection did not preserve the chosen target.");
+        var reconnect = bridge.GetMethod("ShouldReconnect", BindingFlags.NonPublic | BindingFlags.Static)!;
+        bool Retry(bool automatic, bool requested, int count, bool unauthorized) => (bool)reconnect.Invoke(null, new object[] { automatic, requested, count, unauthorized })!;
+        if (Retry(false, false, 0, false) || !Retry(false, true, 0, false) || !Retry(true, false, 0, false) || Retry(true, false, 1, false) || Retry(true, true, 0, true)) throw new Exception("Wireless reconnection policy did not honor the explicit setting and request.");
         Console.WriteLine("Guided ADB setup validation passed.");
     }
     catch (Exception ex) { setupError = ex; }
