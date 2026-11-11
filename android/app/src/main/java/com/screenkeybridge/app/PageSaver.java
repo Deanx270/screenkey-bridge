@@ -70,7 +70,10 @@ final class PageSaver {
         WebView view = new WebView(activity); view.getSettings().setJavaScriptEnabled(false);
         view.getSettings().setAllowFileAccess(false); view.getSettings().setAllowContentAccess(false);
         ViewGroup parent = activity.findViewById(android.R.id.content);
-        parent.addView(view, new ViewGroup.LayoutParams(1, 1)); view.setAlpha(0f);
+        // WebView's print adapter needs a laid-out, renderable view. Keep it
+        // behind the existing phone UI until the system print flow completes.
+        parent.addView(view, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        view.setFocusable(false); view.setClickable(false);
         Handler handler = new Handler(Looper.getMainLooper());
         final boolean[] done = {false}, started = {false};
         Consumer<String> finish = message -> {

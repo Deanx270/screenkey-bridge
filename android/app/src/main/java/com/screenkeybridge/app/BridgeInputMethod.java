@@ -104,7 +104,7 @@ public final class BridgeInputMethod extends InputMethodService {
         network.execute(() -> { try { request("unready"); } catch (Exception ignored) {} });
         super.onFinishInput();
     }
-    @Override public void onDestroy() { ready = false; generation++; network.shutdown(); super.onDestroy(); }
+    @Override public void onDestroy() { ready = false; generation++; try { super.onDestroy(); } finally { network.shutdown(); } }
 
     static JSONObject request(Context context, String route) throws Exception {
         String token = context.getSharedPreferences("MainActivity", MODE_PRIVATE).getString("key", "");
