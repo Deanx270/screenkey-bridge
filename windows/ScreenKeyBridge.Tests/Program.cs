@@ -14,8 +14,13 @@ void Set(string name, object value) => type.GetField(name, flags)!.SetValue(rout
 Set("gate", new object()); Set("queue", new Queue<string>());
 Set("held", new HashSet<int>()); Set("swallowed", new HashSet<int>());
 Set("armed", true); Set("phoneReady", true); Set("lastHeartbeat", Environment.TickCount64); Set("toggleKey", 0x7A); Set("captureKey", 0x79);
+Set("htmlKey", 0x77); Set("pdfKey", 0x78);
 using var captured = new ManualResetEventSlim();
+using var htmlSaved = new ManualResetEventSlim();
+using var pdfSaved = new ManualResetEventSlim();
 type.GetProperty("CaptureRequested")!.SetValue(router, (Action)(() => captured.Set()));
+type.GetProperty("HtmlRequested")!.SetValue(router, (Action)(() => htmlSaved.Set()));
+type.GetProperty("PdfRequested")!.SetValue(router, (Action)(() => pdfSaved.Set()));
 var keyInfo = type.GetNestedType("Kbd", BindingFlags.NonPublic)!;
 var hook = type.GetMethod("OnKey", flags)!;
 void Key(uint key, bool down)
@@ -42,11 +47,15 @@ string[] expected = { "<ctrl:a>", "<ctrl:v>", "<ctrl:z>", "<ctrl:backspace>", "<
 if (state != "phone" || !events.SequenceEqual(expected)) throw new Exception($"Unexpected mode or events: {state}, {string.Join(", ", events)}");
 Press(0x79); // Ctrl+Alt+F10 captures without changing destination.
 if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "phone") throw new Exception("Capture shortcut did not fire in phone mode.");
+Press(0x77); Press(0x78);
+if (!htmlSaved.Wait(2000) || !pdfSaved.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "phone") throw new Exception("Page save shortcuts did not fire in phone mode.");
 Press(0x7B); // Ctrl+Alt+F12
 if ((string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Emergency shortcut did not return to PC.");
 captured.Reset();
 Press(0x79); // The capture shortcut also works while typing stays on the PC.
 if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Capture shortcut did not fire in PC mode.");
+htmlSaved.Reset(); pdfSaved.Reset(); Press(0x77); Press(0x78);
+if (!htmlSaved.Wait(2000) || !pdfSaved.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Page save shortcuts did not fire in PC mode.");
 Console.WriteLine("Keyboard routing regression checks passed.");
 
 var pagesType = type.Assembly.GetType("ScreenKeyBridge.PageBridge", true)!;
@@ -83,6 +92,7 @@ var bridge = RuntimeHelpers.GetUninitializedObject(bridgeType);
 bridgeType.GetField("token", flags)!.SetValue(bridge, new string('P', 64));
 bridgeType.GetField("browserToken", flags)!.SetValue(bridge, sampleToken);
 bridgeType.GetField("pages", flags)!.SetValue(bridge, pages);
+bridgeType.GetField("pageGate", flags)!.SetValue(bridge, new object());
 var routeHandler = bridgeType.GetMethod("Handle", flags)!;
 using var portReservation = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
 portReservation.Start(); int portNumber = ((System.Net.IPEndPoint)portReservation.LocalEndpoint).Port; portReservation.Stop();
@@ -91,7 +101,7 @@ testServer.Prefixes.Add($"http://127.0.0.1:{portNumber}/"); testServer.Start();
 using var httpClient = new System.Net.Http.HttpClient(new System.Net.Http.HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(5) };
 System.Net.Http.HttpResponseMessage Exchange(string route, string method, string? supplied, string? origin, string? body = null) {
     using var request = new System.Net.Http.HttpRequestMessage(new System.Net.Http.HttpMethod(method), $"http://127.0.0.1:{portNumber}{route}");
-    if (supplied != null) request.Headers.TryAddWithoutValidation("X-ScreenKey-Extension", supplied);
+    if (supplied != null) request.Headers.TryAddWithoutValidation(route.StartsWith("/browser/", StringComparison.Ordinal) ? "X-ScreenKey-Extension" : "X-ScreenKey-Token", supplied);
     if (origin != null) request.Headers.TryAddWithoutValidation("Origin", origin);
     if (body != null) request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
     var reply = httpClient.SendAsync(request);
@@ -118,6 +128,20 @@ string deliveredJson = System.Text.Json.JsonSerializer.Serialize(new { id = deli
 using (var response = Exchange("/browser/result", "POST", sampleToken, extensionOrigin, deliveredJson))
     if (!response.IsSuccessStatusCode || deliveredPage.GetAwaiter().GetResult() != deliveredJson) throw new Exception("Authenticated page result failed.");
 Console.WriteLine("Loopback extension HTTP checks passed.");
+var pendingType = bridgeType.GetNestedType("PendingPage", BindingFlags.NonPublic)!;
+var completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+var phoneRequest = Activator.CreateInstance(pendingType, new object[] { "ABCDEF0123456789ABCDEF0123456789", deliveredJson, "pdf", completion })!;
+bridgeType.GetField("pendingPage", flags)!.SetValue(bridge, phoneRequest);
+string phoneId = "ABCDEF0123456789ABCDEF0123456789";
+using (var response = Exchange("/page/pending?id=" + phoneId, "POST", "bad", null))
+    if (response.StatusCode != System.Net.HttpStatusCode.Unauthorized) throw new Exception("Unpaired phone accessed a pending page.");
+using (var response = Exchange("/page/pending?id=wrong", "POST", new string('P', 64), null))
+    if (response.StatusCode != System.Net.HttpStatusCode.NotFound) throw new Exception("Wrong page request ID was accepted.");
+using (var response = Exchange("/page/pending?id=" + phoneId, "POST", new string('P', 64), null))
+    if (!response.IsSuccessStatusCode || response.Content.ReadAsStringAsync().GetAwaiter().GetResult() != deliveredJson) throw new Exception("Paired phone could not retrieve its page.");
+using (var response = Exchange("/page/ack?id=" + phoneId + "&ok=1", "POST", new string('P', 64), null))
+    if (!response.IsSuccessStatusCode || !completion.Task.GetAwaiter().GetResult().Contains("finish saving")) throw new Exception("PDF acknowledgment incorrectly reported a completed save.");
+Console.WriteLine("PC-triggered page handoff checks passed.");
 
 Exception? setupError = null;
 var setupThread = new Thread(() => {

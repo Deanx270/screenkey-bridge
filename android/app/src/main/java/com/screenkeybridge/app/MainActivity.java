@@ -164,6 +164,34 @@ public final class MainActivity extends Activity {
             });
         });
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout); setContentView(scroll);
+        handlePcPdf(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); handlePcPdf(intent); }
+    private void handlePcPdf(Intent intent) {
+        if (intent == null || !"com.screenkeybridge.action.PRINT_PAGE".equals(intent.getAction())) return;
+        String id = intent.getStringExtra("request_id"); intent.setAction(null); intent.removeExtra("request_id");
+        if (id == null || !id.matches("[A-F0-9]{32}")) { status.setText("Invalid page request."); return; }
+        String secret = getPreferences(MODE_PRIVATE).getString("key", "");
+        if (secret == null || !secret.matches("[A-F0-9]{64}")) { status.setText("Pair the phone with the PC first."); return; }
+        status.setText("Preparing PDF from the PC…");
+        worker.execute(() -> {
+            try {
+                String html = PageSaver.fetch(secret, id);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    java.util.concurrent.atomic.AtomicBoolean reported = new java.util.concurrent.atomic.AtomicBoolean();
+                    PageSaver.pdf(this, html, message -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        status.setText(message);
+                        if (reported.compareAndSet(false, true)) { try { worker.execute(() -> PageSaver.acknowledge(secret, id, message.startsWith("Choose Save as PDF"))); } catch (java.util.concurrent.RejectedExecutionException ignored) { } }
+                    });
+                });
+            } catch (Exception e) {
+                PageSaver.acknowledge(secret, id, false);
+                runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) status.setText("Page save failed: " + e.getMessage()); });
+            }
+        });
     }
 
     private static final class DisplayChoice {

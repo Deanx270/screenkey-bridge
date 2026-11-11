@@ -17,7 +17,11 @@ internal sealed class KeyboardRouter : IDisposable
     private bool phoneReady;
     private int toggleKey = 0x7A;
     private int captureKey = 0x79;
+    private int htmlKey = 0x77;
+    private int pdfKey = 0x78;
     public Action? CaptureRequested { get; set; }
+    public Action? HtmlRequested { get; set; }
+    public Action? PdfRequested { get; set; }
     private const int LeaseMs = 2000;
     private const int ArmMs = 30000;
 
@@ -57,6 +61,8 @@ internal sealed class KeyboardRouter : IDisposable
         if (number < 1 || number > 11) throw new ArgumentOutOfRangeException(nameof(number));
         lock (gate) captureKey = 0x6F + number;
     }
+    public void SetHtmlFunctionKey(int number) { if (number < 1 || number > 11) throw new ArgumentOutOfRangeException(nameof(number)); lock (gate) htmlKey = 0x6F + number; }
+    public void SetPdfFunctionKey(int number) { if (number < 1 || number > 11) throw new ArgumentOutOfRangeException(nameof(number)); lock (gate) pdfKey = 0x6F + number; }
     public string[] Heartbeat()
     {
         lock (gate)
@@ -92,6 +98,11 @@ internal sealed class KeyboardRouter : IDisposable
             if (down && ctrl && alt && key == captureKey)
             {
                 if (firstDown) ThreadPool.QueueUserWorkItem(_ => CaptureRequested?.Invoke());
+                swallowed.Add(key); return (IntPtr)1;
+            }
+            if (down && ctrl && alt && (key == htmlKey || key == pdfKey))
+            {
+                if (firstDown) { Action? action = key == htmlKey ? HtmlRequested : PdfRequested; if (action != null) ThreadPool.QueueUserWorkItem(_ => action()); }
                 swallowed.Add(key); return (IntPtr)1;
             }
             if (down && ctrl && alt && (key == toggleKey || key == 0x7B))

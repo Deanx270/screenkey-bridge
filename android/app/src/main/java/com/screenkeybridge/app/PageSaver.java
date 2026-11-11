@@ -24,6 +24,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -33,7 +34,12 @@ import java.util.function.Consumer;
 final class PageSaver {
     private PageSaver() {}
     static String fetch(String secret) throws Exception {
-        HttpURLConnection c = (HttpURLConnection)new URL("http://127.0.0.1:38473/page/save").openConnection();
+        return fetch(secret, null);
+    }
+    static String fetch(String secret, String requestId) throws Exception {
+        if (requestId != null && !requestId.matches("[A-F0-9]{32}")) throw new Exception("Invalid page request.");
+        String route = requestId == null ? "/page/save" : "/page/pending?id=" + URLEncoder.encode(requestId, "UTF-8");
+        HttpURLConnection c = (HttpURLConnection)new URL("http://127.0.0.1:38473" + route).openConnection();
         c.setRequestMethod("POST"); c.setConnectTimeout(5000); c.setReadTimeout(45000); c.setRequestProperty("X-ScreenKey-Token", secret);
         try {
             int code = c.getResponseCode();
@@ -46,6 +52,13 @@ final class PageSaver {
                 String html = data.getString("html"); if (html.isEmpty()) throw new Exception("The page was empty."); return html;
             }
         } finally { c.disconnect(); }
+    }
+    static void acknowledge(String secret, String requestId, boolean success) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection)new URL("http://127.0.0.1:38473/page/ack?id=" + URLEncoder.encode(requestId, "UTF-8") + "&ok=" + (success ? "1" : "0")).openConnection();
+            c.setRequestMethod("POST"); c.setConnectTimeout(3000); c.setReadTimeout(3000); c.setRequestProperty("X-ScreenKey-Token", secret); c.getResponseCode();
+        } catch (Exception ignored) { } finally { if (c != null) c.disconnect(); }
     }
     private static Uri create(Context context, String extension, String mime) throws Exception {
         ContentValues v = new ContentValues();

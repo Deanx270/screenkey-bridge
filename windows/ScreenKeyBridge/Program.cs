@@ -38,6 +38,8 @@ internal sealed class BridgeContext : ApplicationContext
     private volatile string? browserToken;
     private readonly string shortcutPath;
     private readonly string captureShortcutPath;
+    private readonly string htmlShortcutPath;
+    private readonly string pdfShortcutPath;
     private readonly string displayPreferencePath;
     private readonly string androidTargetPath;
     private readonly string devicePath;
@@ -47,9 +49,12 @@ internal sealed class BridgeContext : ApplicationContext
     private readonly ToolStripMenuItem connectionItem = new("ADB: checking…") { Enabled = false };
     private readonly ToolStripMenuItem startupItem = new("Start at Windows sign-in");
     private readonly ToolStripMenuItem captureItem = new("Last screenshot: none") { Enabled = false };
+    private readonly ToolStripMenuItem pageItem = new("Last page save: none") { Enabled = false };
     private readonly Control ui = new();
     private int shortcut = 11;
     private int captureShortcut = 10;
+    private int htmlShortcut = 8;
+    private int pdfShortcut = 9;
     private string captureStatus = "none";
     private volatile string? connectedSerial;
     private volatile string? preferredSerial;
@@ -60,7 +65,11 @@ internal sealed class BridgeContext : ApplicationContext
     private string selectedDisplay = "";
     private PendingCapture? pendingCapture;
     private int captureBusy;
+    private readonly object pageGate = new();
+    private PendingPage? pendingPage;
+    private int pageBusy;
     private sealed record PendingCapture(string Id, byte[] Image, TaskCompletionSource<string> Completion);
+    private sealed record PendingPage(string Id, string Json, string Format, TaskCompletionSource<string> Completion);
 
     public BridgeContext()
     {
@@ -77,14 +86,23 @@ internal sealed class BridgeContext : ApplicationContext
         _ = ui.Handle;
         shortcutPath = Path.Combine(dir, "keyboard-shortcut.txt");
         captureShortcutPath = Path.Combine(dir, "capture-shortcut.txt");
+        htmlShortcutPath = Path.Combine(dir, "html-shortcut.txt");
+        pdfShortcutPath = Path.Combine(dir, "pdf-shortcut.txt");
         displayPreferencePath = Path.Combine(dir, "capture-display.txt");
         if (File.Exists(displayPreferencePath)) selectedDisplay = File.ReadAllText(displayPreferencePath).Trim();
         if (File.Exists(shortcutPath) && int.TryParse(File.ReadAllText(shortcutPath), out int saved) && saved is >= 1 and <= 11) shortcut = saved;
         if (File.Exists(captureShortcutPath) && int.TryParse(File.ReadAllText(captureShortcutPath), out int captureSaved) && captureSaved is >= 1 and <= 11) captureShortcut = captureSaved;
-        if (captureShortcut == shortcut) captureShortcut = shortcut == 10 ? 9 : 10;
+        captureShortcut = FreeShortcut(captureShortcut, shortcut);
+        if (File.Exists(htmlShortcutPath) && int.TryParse(File.ReadAllText(htmlShortcutPath), out int htmlSaved)) htmlShortcut = htmlSaved;
+        if (File.Exists(pdfShortcutPath) && int.TryParse(File.ReadAllText(pdfShortcutPath), out int pdfSaved)) pdfShortcut = pdfSaved;
+        htmlShortcut = FreeShortcut(htmlShortcut, shortcut, captureShortcut);
+        pdfShortcut = FreeShortcut(pdfShortcut, shortcut, captureShortcut, htmlShortcut);
         keyboard.SetToggleFunctionKey(shortcut);
         keyboard.SetCaptureFunctionKey(captureShortcut);
+        keyboard.SetHtmlFunctionKey(htmlShortcut); keyboard.SetPdfFunctionKey(pdfShortcut);
         keyboard.CaptureRequested = () => _ = CaptureForPhone();
+        keyboard.HtmlRequested = () => _ = SavePageForPhone("html");
+        keyboard.PdfRequested = () => _ = SavePageForPhone("pdf");
         string path = Path.Combine(dir, "pairing-key.txt");
         if (!File.Exists(path)) File.WriteAllText(path, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         token = File.ReadAllText(path).Trim();
@@ -92,6 +110,7 @@ internal sealed class BridgeContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add(connectionItem);
         menu.Items.Add(captureItem);
+        menu.Items.Add(pageItem);
         menu.Items.Add("Show status", null, (_, _) => ShowStatus());
         menu.Items.Add("Connect and pair a phone…", null, (_, _) => OpenSetup());
         menu.Items.Add("Set up Edge page saving…", null, (_, _) => { try { browserToken = EdgeBrowserLink.Configure(); EdgeBrowserLink.Setup(); } catch (Exception ex) { MessageBox.Show(ex.Message, "ScreenKey Bridge"); } });
@@ -132,7 +151,7 @@ internal sealed class BridgeContext : ApplicationContext
             var item = new ToolStripMenuItem($"F{i}") { Checked = i == shortcut };
             item.Click += (_, _) => {
                 try {
-                    if (choice == captureShortcut) { MessageBox.Show("Choose a different key from the screenshot shortcut.", "ScreenKey Bridge"); return; }
+                    if (choice == captureShortcut || choice == htmlShortcut || choice == pdfShortcut) { MessageBox.Show("Choose a key that is not used by another ScreenKey shortcut.", "ScreenKey Bridge"); return; }
                     File.WriteAllText(shortcutPath, choice.ToString());
                     shortcut = choice; keyboard.SetToggleFunctionKey(choice);
                     foreach (ToolStripMenuItem entry in shortcutMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
@@ -148,7 +167,7 @@ internal sealed class BridgeContext : ApplicationContext
             var item = new ToolStripMenuItem($"F{i}") { Checked = i == captureShortcut };
             item.Click += (_, _) => {
                 try {
-                    if (choice == shortcut) { MessageBox.Show("Choose a different key from the keyboard shortcut.", "ScreenKey Bridge"); return; }
+                    if (choice == shortcut || choice == htmlShortcut || choice == pdfShortcut) { MessageBox.Show("Choose a key that is not used by another ScreenKey shortcut.", "ScreenKey Bridge"); return; }
                     File.WriteAllText(captureShortcutPath, choice.ToString());
                     captureShortcut = choice; keyboard.SetCaptureFunctionKey(choice);
                     foreach (ToolStripMenuItem entry in captureMenu.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
@@ -157,6 +176,8 @@ internal sealed class BridgeContext : ApplicationContext
             captureMenu.DropDownItems.Add(item);
         }
         menu.Items.Add(captureMenu);
+        AddPageShortcutMenu(menu, "Save HTML shortcut (Ctrl+Alt)", false);
+        AddPageShortcutMenu(menu, "Save PDF shortcut (Ctrl+Alt)", true);
         menu.Items.Add("Return keyboard to PC (Ctrl+Alt+F12)", null, (_, _) => keyboard.Disconnect());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         using (var iconStream = typeof(BridgeContext).Assembly.GetManifestResourceStream("ScreenKeyBridge.screenkey.ico") ?? throw new InvalidOperationException("Application icon is missing."))
@@ -172,7 +193,27 @@ internal sealed class BridgeContext : ApplicationContext
         _ = ConnectAdb();
     }
 
-    private void ShowStatus() => MessageBox.Show($"{status}\nAndroid app: {(androidPackage.EndsWith(".preview", StringComparison.Ordinal) ? "side-by-side preview" : "normal")}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nTo connect or switch phones, choose Connect and pair a phone in the tray menu.", "ScreenKey Bridge");
+    private static int FreeShortcut(int preferred, params int[] used) => preferred is >= 1 and <= 11 && !used.Contains(preferred) ? preferred : Enumerable.Range(1, 11).First(n => !used.Contains(n));
+    private void AddPageShortcutMenu(ContextMenuStrip menu, string label, bool pdf)
+    {
+        var choices = new ToolStripMenuItem(label);
+        for (int i = 1; i <= 11; i++) {
+            int choice = i;
+            var item = new ToolStripMenuItem($"F{i}") { Checked = i == (pdf ? pdfShortcut : htmlShortcut) };
+            item.Click += (_, _) => {
+                if (choice == shortcut || choice == captureShortcut || choice == (pdf ? htmlShortcut : pdfShortcut)) { MessageBox.Show("Choose a key that is not used by another ScreenKey shortcut.", "ScreenKey Bridge"); return; }
+                try {
+                    File.WriteAllText(pdf ? pdfShortcutPath : htmlShortcutPath, choice.ToString());
+                    if (pdf) { pdfShortcut = choice; keyboard.SetPdfFunctionKey(choice); } else { htmlShortcut = choice; keyboard.SetHtmlFunctionKey(choice); }
+                    foreach (ToolStripMenuItem entry in choices.DropDownItems) entry.Checked = ReferenceEquals(entry, item);
+                } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { MessageBox.Show($"Could not save shortcut: {ex.Message}", "ScreenKey Bridge"); }
+            };
+            choices.DropDownItems.Add(item);
+        }
+        menu.Items.Add(choices);
+    }
+    private void ShowStatus() => MessageBox.Show($"{status}\nAndroid app: {(androidPackage.EndsWith(".preview", StringComparison.Ordinal) ? "side-by-side preview" : "normal")}\nKeyboard: {keyboard.State()}\nLast screenshot: {captureStatus}\n\nCtrl+Alt+F{captureShortcut}: capture to phone\nCtrl+Alt+F{htmlShortcut}: save Edge page as HTML\nCtrl+Alt+F{pdfShortcut}: save Edge page as PDF\nCtrl+Alt+F{shortcut}: toggle keyboard routing\nCtrl+Alt+F12: return keyboard to PC\n\nTo connect or switch phones, choose Connect and pair a phone in the tray menu.", "ScreenKey Bridge");
+    private void SetPageStatus(string value) { if (ui.IsDisposed || !ui.IsHandleCreated) return; if (ui.InvokeRequired) { try { ui.BeginInvoke(() => SetPageStatus(value)); } catch (InvalidOperationException) { } return; } pageItem.Text = "Last page save: " + value; }
     private void OpenSetup() { using var form = new ConnectionSetupForm(RunAdb, PairPhone); form.ShowDialog(); }
     private void SetCaptureStatus(string value)
     {
@@ -413,6 +454,31 @@ internal sealed class BridgeContext : ApplicationContext
         }
     }
 
+    private async Task SavePageForPhone(string format)
+    {
+        if (Interlocked.Exchange(ref pageBusy, 1) != 0) { SetPageStatus("another page save is in progress"); return; }
+        PendingPage? request = null;
+        try {
+            string? serial = connectedSerial;
+            if (serial == null) throw new InvalidOperationException("phone is not connected");
+            if (!EdgeBrowserLink.EdgeIsForeground()) throw new InvalidOperationException("bring Edge to the foreground");
+            SetPageStatus("capturing Edge page…");
+            string json = await pages.Capture();
+            request = new PendingPage(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)), json, format, new(TaskCreationOptions.RunContinuationsAsynchronously));
+            lock (pageGate) pendingPage = request;
+            string target = androidPackage;
+            string command = format == "html"
+                ? $"-s {serial} shell am start-foreground-service -n {target}/com.screenkeybridge.app.PageSaveService --es request_id {request.Id}"
+                : $"-s {serial} shell am start -n {target}/com.screenkeybridge.app.MainActivity -a com.screenkeybridge.action.PRINT_PAGE -f 0x24000000 --es request_id {request.Id}";
+            string output = await RunAdb(command);
+            if (output.Contains("Error:", StringComparison.OrdinalIgnoreCase) || output.Contains("Exception", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("phone could not start the page save");
+            SetPageStatus("sending to phone…");
+            if (await Task.WhenAny(request.Completion.Task, Task.Delay(TimeSpan.FromSeconds(60))) != request.Completion.Task) throw new TimeoutException("phone did not confirm; unlock it and try again");
+            SetPageStatus(await request.Completion.Task);
+        } catch (Exception ex) { SetPageStatus("failed: " + ex.Message); }
+        finally { lock (pageGate) { if (ReferenceEquals(pendingPage, request)) pendingPage = null; } Interlocked.Exchange(ref pageBusy, 0); }
+    }
+
     private async Task Serve()
     {
         while (!stop.IsCancellationRequested)
@@ -460,6 +526,18 @@ internal sealed class BridgeContext : ApplicationContext
                     await context.Response.OutputStream.WriteAsync(payload);
                 }
                 return;
+            }
+            if (route is "/page/pending" or "/page/ack")
+            {
+                string? id = context.Request.QueryString["id"];
+                PendingPage? pending; lock (pageGate) pending = pendingPage;
+                if (pending == null || !string.Equals(id, pending.Id, StringComparison.Ordinal)) { context.Response.StatusCode = 404; return; }
+                if (route == "/page/ack") {
+                    pending.Completion.TrySetResult(context.Request.QueryString["ok"] == "1" ? (pending.Format == "pdf" ? "PDF ready on phone; finish saving there" : "HTML saved to phone") : "phone could not save the page"); return;
+                }
+                byte[] payload = Encoding.UTF8.GetBytes(pending.Json);
+                context.Response.ContentType = "application/json"; context.Response.ContentLength64 = payload.Length;
+                await context.Response.OutputStream.WriteAsync(payload); return;
             }
             if (route == "/browser/poll")
             {
