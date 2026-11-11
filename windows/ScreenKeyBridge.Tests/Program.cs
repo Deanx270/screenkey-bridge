@@ -49,6 +49,24 @@ Press(0x79); // The capture shortcut also works while typing stays on the PC.
 if (!captured.Wait(2000) || (string)type.GetMethod("State")!.Invoke(router, null)! != "pc") throw new Exception("Capture shortcut did not fire in PC mode.");
 Console.WriteLine("Keyboard routing regression checks passed.");
 
+var pagesType = type.Assembly.GetType("ScreenKeyBridge.PageBridge", true)!;
+var pages = Activator.CreateInstance(pagesType)!;
+var capturePage = pagesType.GetMethod("Capture")!;
+var claimPage = pagesType.GetMethod("Claim")!;
+var completePage = pagesType.GetMethod("Complete")!;
+var pendingPage = (Task<string>)capturePage.Invoke(pages, null)!;
+string pageId = (string)claimPage.Invoke(pages, null)!;
+if (claimPage.Invoke(pages, null) != null) throw new Exception("A page request was claimed twice.");
+if ((bool)completePage.Invoke(pages, new object[] { "{\"id\":\"wrong\",\"title\":\"Wrong\",\"html\":\"wrong\"}" })!) throw new Exception("A different request completed the page save.");
+string pageResult = System.Text.Json.JsonSerializer.Serialize(new { id = pageId, title = "Example", html = "<p>saved</p>" });
+if (!(bool)completePage.Invoke(pages, new object[] { pageResult })! || pendingPage.GetAwaiter().GetResult() != pageResult) throw new Exception("Page content was not delivered to the requesting phone.");
+var failedPage = (Task<string>)capturePage.Invoke(pages, null)!;
+pageId = (string)claimPage.Invoke(pages, null)!;
+completePage.Invoke(pages, new object[] { System.Text.Json.JsonSerializer.Serialize(new { id = pageId, error = "Edge unavailable" }) });
+try { failedPage.GetAwaiter().GetResult(); throw new Exception("Page error was not reported."); }
+catch (InvalidOperationException ex) when (ex.Message == "Edge unavailable") { }
+Console.WriteLine("Page request routing checks passed.");
+
 Exception? setupError = null;
 var setupThread = new Thread(() => {
     try

@@ -115,6 +115,26 @@ public final class MainActivity extends Activity {
         capture = new Button(this); capture.setText("Capture PC screen");
         layout.addView(capture);
         status = new TextView(this); status.setText("Ready"); layout.addView(status);
+        TextView pageLabel = new TextView(this); pageLabel.setText("Save the current Edge page"); layout.addView(pageLabel);
+        Spinner pageFormat = new Spinner(this);
+        ArrayAdapter<String> pageFormats = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, new String[]{"HTML", "PDF"});
+        pageFormats.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); pageFormat.setAdapter(pageFormats);
+        pageFormat.setSelection(getPreferences(MODE_PRIVATE).getInt("page_format", 0) == 1 ? 1 : 0); layout.addView(pageFormat);
+        Button savePage = new Button(this); savePage.setText("Save current Edge page to phone"); layout.addView(savePage);
+        savePage.setOnClickListener(v -> {
+            String secret = key.getText().toString().trim();
+            if (!secret.matches("[0-9A-F]{64}")) { status.setText("Connect and pair this phone from the Windows tray menu first."); return; }
+            boolean pdf = pageFormat.getSelectedItemPosition() == 1;
+            getPreferences(MODE_PRIVATE).edit().putInt("page_format", pdf ? 1 : 0).apply();
+            savePage.setEnabled(false); status.setText("Saving page from Edge…");
+            worker.execute(() -> {
+                try {
+                    String html = PageSaver.fetch(secret);
+                    if (!pdf) { PageSaver.html(this, html); runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { status.setText("Saved HTML to Downloads/ScreenKey Bridge."); savePage.setEnabled(true); } }); }
+                    else runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) PageSaver.pdf(this, html, message -> { if (!isFinishing() && !isDestroyed()) { status.setText(message); savePage.setEnabled(true); } }); });
+                } catch (Exception e) { runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { status.setText("Page save failed: " + e.getMessage()); savePage.setEnabled(true); } }); }
+            });
+        });
         Button enable = new Button(this); enable.setText("Enable ScreenKey keyboard");
         enable.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))); layout.addView(enable);
         Button choose = new Button(this); choose.setText("Choose ScreenKey keyboard");

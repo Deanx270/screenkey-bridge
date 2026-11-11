@@ -32,6 +32,7 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 Source: "{#DotnetDir}\LICENSE.txt"; DestDir: "{app}\licenses\dotnet"; Flags: ignoreversion
 Source: "{#DotnetDir}\ThirdPartyNotices.txt"; DestDir: "{app}\licenses\dotnet"; Flags: ignoreversion
 Source: "{#PublishDir}\ScreenKeyBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PublishDir}\edge-extension\*"; DestDir: "{app}\edge-extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PlatformToolsDir}\adb.exe"; DestDir: "{app}\platform-tools"; Flags: ignoreversion
 Source: "{#PlatformToolsDir}\AdbWinApi.dll"; DestDir: "{app}\platform-tools"; Flags: ignoreversion
 Source: "{#PlatformToolsDir}\AdbWinUsbApi.dll"; DestDir: "{app}\platform-tools"; Flags: ignoreversion

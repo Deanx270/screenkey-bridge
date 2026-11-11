@@ -10,5 +10,6 @@
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="screenkey.ico" LogicalName="ScreenKeyBridge.screenkey.ico" />
+    <Content Include="../../browser/edge/**/*" Link="edge-extension/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 </Project>

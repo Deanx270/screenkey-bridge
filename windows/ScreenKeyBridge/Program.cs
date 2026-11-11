@@ -12,8 +12,9 @@ namespace ScreenKeyBridge;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (EdgeNativeHost.IsHostInvocation(args)) { EdgeNativeHost.Run().GetAwaiter().GetResult(); return; }
         using var instance = new Mutex(true, "ScreenKeyBridge.User." + Environment.UserName, out bool first);
         if (!first) return;
         ApplicationConfiguration.Initialize();
@@ -34,6 +35,7 @@ internal sealed class BridgeContext : ApplicationContext
     private int disconnecting;
     private string status = "Starting";
     private readonly KeyboardRouter keyboard = new();
+    private readonly PageBridge pages = new();
     private readonly string shortcutPath;
     private readonly string captureShortcutPath;
     private readonly string displayPreferencePath;
@@ -91,6 +93,7 @@ internal sealed class BridgeContext : ApplicationContext
         menu.Items.Add(captureItem);
         menu.Items.Add("Show status", null, (_, _) => ShowStatus());
         menu.Items.Add("Connect and pair a phone…", null, (_, _) => OpenSetup());
+        menu.Items.Add("Set up Edge page saving…", null, (_, _) => { try { EdgeNativeHost.Setup(); } catch (Exception ex) { MessageBox.Show(ex.Message, "ScreenKey Bridge"); } });
         var targetMenu = new ToolStripMenuItem("Android app installation");
         foreach (var target in new[] { (Name: "Normal app", Package: "com.screenkeybridge.app"), (Name: "Side-by-side preview", Package: "com.screenkeybridge.app.preview") })
         {
@@ -429,6 +432,36 @@ internal sealed class BridgeContext : ApplicationContext
             if (actual.Length != expected.Length || !CryptographicOperations.FixedTimeEquals(actual, expected)) { context.Response.StatusCode = 401; return; }
             if (context.Request.HttpMethod != "POST") { context.Response.StatusCode = 404; return; }
             string? route = context.Request.Url?.AbsolutePath;
+            if (route == "/page/save")
+            {
+                try {
+                    string json = await pages.Capture();
+                    byte[] payload = Encoding.UTF8.GetBytes(json);
+                    context.Response.ContentType = "application/json"; context.Response.ContentLength64 = payload.Length;
+                    await context.Response.OutputStream.WriteAsync(payload);
+                } catch (Exception ex) {
+                    context.Response.StatusCode = 409;
+                    byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new { error = ex.Message });
+                    context.Response.ContentType = "application/json"; context.Response.ContentLength64 = payload.Length;
+                    await context.Response.OutputStream.WriteAsync(payload);
+                }
+                return;
+            }
+            if (route == "/browser/poll")
+            {
+                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new { id = pages.Claim() });
+                context.Response.ContentType = "application/json"; context.Response.ContentLength64 = payload.Length;
+                await context.Response.OutputStream.WriteAsync(payload); return;
+            }
+            if (route == "/browser/result")
+            {
+                if (context.Request.ContentLength64 > 16 * 1024 * 1024) { context.Response.StatusCode = 413; return; }
+                using var data = new MemoryStream();
+                byte[] buffer = new byte[32768]; int count;
+                while ((count = await context.Request.InputStream.ReadAsync(buffer)) != 0) { if (data.Length + count > 16 * 1024 * 1024) { context.Response.StatusCode = 413; return; } data.Write(buffer, 0, count); }
+                context.Response.StatusCode = pages.Complete(Encoding.UTF8.GetString(data.ToArray())) ? 200 : 404;
+                return;
+            }
             if (route == "/capture/request")
             {
                 _ = Task.Run(CaptureForPhone);
